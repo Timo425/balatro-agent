@@ -1,4 +1,6 @@
+.venv
 .venv/
 __pycache__/
 *.py[cod]
 vendor/
+.pytest_cache/
