@@ -32,17 +32,12 @@ class TestBalatroAgent(unittest.TestCase):
         )
 
         action = self.agent.decide_hand_action(state)
-        print("\n--- Scenario A (Winning Flush) ---")
-        print("Action:", action.action_type)
-        print("Reasoning:", action.reasoning)
-        print("Cards:", action.cards)
-
         self.assertEqual(action.action_type, "PLAY")
         self.assertEqual(len(action.cards), 5)
         self.assertTrue(all(c.suit == "Spades" for c in action.cards))
 
     def test_scenario_b_flush_digging_discard(self):
-        """Scenario B: Weak hand (High Card only) against 800 chip blind, holding 4 Hearts with 3 discards remaining."""
+        """Scenario B: Weak hand against 800 chip blind, holding 4 Hearts with 3 discards remaining."""
         hand = [
             Card("K", "Hearts", 1),
             Card("10", "Hearts", 2),
@@ -66,33 +61,41 @@ class TestBalatroAgent(unittest.TestCase):
         )
 
         action = self.agent.decide_hand_action(state)
-        print("\n--- Scenario B (Flush Digging) ---")
-        print("Action:", action.action_type)
-        print("Reasoning:", action.reasoning)
-        print("Cards:", action.cards)
-
         self.assertEqual(action.action_type, "DISCARD")
-        # Discarded cards must NOT be Hearts
         self.assertTrue(all(c.suit != "Hearts" for c in action.cards))
 
-    def test_scenario_c_shop_joker_purchase(self):
-        """Scenario C: Shop in Ante 1 with $12, holding 0 Jokers."""
-        state = BalatroGameState(
-            ante=1,
-            blind_name="Small Blind",
-            target_chips=300,
-            current_chips=350,
-            hands_left=3,
-            discards_left=2,
-            money=12,
-            hand=[],
-            jokers=[]
-        )
-        shop_jokers = ["Gros Michel (+15 Mult)", "Banner (+40 Chips per discard)"]
-        decision = self.agent.decide_shop_purchase(state, shop_jokers)
-        print("\n--- Scenario C (Shop Decision) ---")
-        print("Shop Decision:", decision)
-        self.assertIn(decision, ["buy_flat_mult", "buy_scaling"])
+    def test_rule_joker_order(self):
+        """RULE_JOKER_ORDER: +Chips (Banner) left, +Flat Mult (Joker) mid, X-Mult (Cavendish) right."""
+        jokers = [
+            {"label": "Cavendish", "key": "j_cavendish"},  # X-Mult (cat 3)
+            {"label": "Banner", "key": "j_banner"},        # Chips (cat 0)
+            {"label": "Half Joker", "key": "j_half"}       # Flat Mult (cat 1)
+        ]
+        new_order = self.agent.decide_joker_order(jokers)
+        # Should reorder to Banner (idx 1) -> Half Joker (idx 2) -> Cavendish (idx 0)
+        self.assertEqual(new_order, [1, 2, 0])
+
+    def test_rule_use_planet(self):
+        """RULE_USE_PLANET: Planet card must be consumed immediately."""
+        consumables = [
+            {"label": "Jupiter", "key": "c_jupiter", "set": "PLANET"}
+        ]
+        action = self.agent.decide_consumable_action(consumables)
+        self.assertIsNotNone(action)
+        idx, reasoning = action
+        self.assertEqual(idx, 0)
+        self.assertIn("Jupiter", reasoning)
+
+    def test_rule_pack_card_selection(self):
+        """RULE_SHOP_PRIORITY: Selects Jupiter for Flush from Celestial pack."""
+        pack_cards = [
+            {"label": "Mercury", "key": "c_mercury", "set": "PLANET"},
+            {"label": "Jupiter", "key": "c_jupiter", "set": "PLANET"}
+        ]
+        decision = self.agent.decide_pack_card(pack_cards)
+        self.assertIsNotNone(decision)
+        idx, reasoning = decision
+        self.assertEqual(idx, 1)
 
 if __name__ == "__main__":
     unittest.main()

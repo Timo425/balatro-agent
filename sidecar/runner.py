@@ -24,7 +24,39 @@ class BalatroLayaRunner:
         self.agent = self.client.agent
         self.last_state_name = None
 
+    def check_joker_rearrange(self, raw_g: dict):
+        """Ensures RULE_JOKER_ORDER (+Chips -> +Flat Mult -> +Scaling -> X-Mult)."""
+        jokers = raw_g.get("jokers", {}).get("cards", [])
+        if len(jokers) > 1:
+            new_order = self.agent.decide_joker_order(jokers)
+            if new_order is not None:
+                console.print(f"[bold yellow]🔄 RULE_JOKER_ORDER:[/bold yellow] Reordering Jokers to {new_order} (X-Mult to right)")
+                self.client.rearrange_jokers(new_order)
+                time.sleep(0.3)
+
+    def check_consumables(self, raw_g: dict) -> bool:
+        """Ensures RULE_USE_PLANET & RULE_USE_TAROT."""
+        consumables = raw_g.get("consumables", {}).get("cards", [])
+        if not consumables:
+            return False
+
+        decision = self.agent.decide_consumable_action(consumables)
+        if decision is not None:
+            idx, reasoning = decision
+            console.print(f"[bold magenta]✨ Consumable Action:[/bold magenta] {reasoning}")
+            self.client.use_consumable(idx)
+            time.sleep(0.4)
+            return True
+        return False
+
     def handle_hand_decision(self, raw_g: dict):
+        # 1. First ensure Jokers are in optimal order for scoring
+        self.check_joker_rearrange(raw_g)
+
+        # 2. Use any immediate consumables (like planet cards)
+        if self.check_consumables(raw_g):
+            return
+
         state = self.client.parse_state(raw_g)
         action: AgentAction = self.agent.decide_hand_action(state)
 
@@ -42,7 +74,6 @@ class BalatroLayaRunner:
         console.print(table)
         console.print(f"[bold cyan]Action:[/bold cyan] {action.action_type} | [bold cyan]Reasoning:[/bold cyan] {action.reasoning}")
 
-        # In coder/balatrobot, card indices in play/discard are 0-based
         card_indices = [c.id for c in action.cards]
         if action.action_type == "PLAY":
             console.print(f"[bold green]>> PLAYING CARDS:[/bold green] {card_indices}")
@@ -52,6 +83,13 @@ class BalatroLayaRunner:
             self.client.discard_cards(card_indices)
 
     def handle_shop_decision(self, raw_g: dict):
+        # 1. Use any pending consumables
+        if self.check_consumables(raw_g):
+            return
+
+        # 2. Check Jokers rearrangement
+        self.check_joker_rearrange(raw_g)
+
         shop_cards_raw = raw_g.get("shop", {}).get("cards", [])
         dollars = raw_g.get("money", 0)
         current_jokers = [j.get("label") or j.get("key", "") for j in raw_g.get("jokers", {}).get("cards", [])]
@@ -96,11 +134,51 @@ class BalatroLayaRunner:
             console.print(f"[bold green]>> BUYING ITEM AT INDEX:[/bold green] {zero_based_idx}")
             self.client.buy_card(zero_based_idx)
             time.sleep(0.5)
+            return
+
+        # 3. Check Booster packs if cash >= $25 or early Buffoon pack
+        packs_raw = raw_g.get("packs", {}).get("cards", [])
+        if packs_raw and (dollars >= 25 or (ante <= 2 and len(current_jokers) < 2)):
+            for p_idx, pack in enumerate(packs_raw):
+                cost = pack.get("cost", {}).get("buy", 6)
+                if dollars - cost >= (20 if ante >= 3 else 0):
+                    pack_name = pack.get("label") or pack.get("key", "Booster Pack")
+                    console.print(f"[bold green]🎁 Buying Booster Pack:[/bold green] '{pack_name}' (${cost})")
+                    self.client.buy_pack(p_idx)
+                    time.sleep(0.5)
+                    return
+
+        # 4. If no more actions, proceed to next round
+        console.print(f"[bold yellow]🚪 Shop Decision:[/bold yellow] Ending shop (bankroll preserved for interest).")
+        console.print(f"[bold yellow]>> LEAVING SHOP (NEXT ROUND)[/bold yellow]")
+        self.client.next_round()
+        time.sleep(0.5)
+
+    def handle_booster_pack(self, raw_g: dict):
+        """Handles opened booster pack (SMODS_BOOSTER_OPENED state)."""
+        pack_cards = raw_g.get("pack", {}).get("cards", [])
+        if not pack_cards:
+            console.print("[yellow]Pack empty, skipping...[/yellow]")
+            self.client.select_pack_card(skip=True)
+            return
+
+        table = Table(title="🎁 Booster Pack Contents", show_header=True)
+        table.add_column("Idx", justify="center", style="cyan")
+        table.add_column("Card", justify="left", style="magenta")
+        table.add_column("Type", justify="center", style="green")
+        for idx, c in enumerate(pack_cards):
+            table.add_row(str(idx), c.get("label") or c.get("key", ""), c.get("set", ""))
+        console.print(table)
+
+        decision = self.agent.decide_pack_card(pack_cards)
+        if decision is not None:
+            card_idx, reasoning = decision
+            console.print(f"[bold green]🎯 Pack Decision:[/bold green] {reasoning}")
+            self.client.select_pack_card(card_idx=card_idx)
         else:
-            console.print(f"[bold yellow]🚪 Shop Decision:[/bold yellow] Ending shop (bankroll preserved for interest).")
-            console.print(f"[bold yellow]>> LEAVING SHOP (NEXT ROUND)[/bold yellow]")
-            self.client.next_round()
-            time.sleep(0.5)
+            console.print("[yellow]Skipping pack...[/yellow]")
+            self.client.select_pack_card(skip=True)
+        time.sleep(0.5)
 
     def run_step(self) -> bool:
         raw_state = self.client.get_gamestate()
@@ -134,13 +212,16 @@ class BalatroLayaRunner:
             self.handle_shop_decision(raw_state)
             return True
 
+        elif current_state in ("SMODS_BOOSTER_OPENED", "BOOSTER_PACK"):
+            self.handle_booster_pack(raw_state)
+            return True
+
         elif current_state == "GAME_OVER":
             console.print(f"[bold red]💀 Run Ended at Ante {raw_state.get('ante_num', '?')}. Waiting...[/bold red]")
             time.sleep(2.0)
             return False
 
         elif current_state == "MENU":
-            # Auto-start on Profile 3 if in menu
             console.print("[dim]In Menu - Starting new Red Deck White Stake run...[/dim]")
             self.client.start_game("RED", "WHITE")
             time.sleep(1.0)
@@ -153,7 +234,7 @@ class BalatroLayaRunner:
             "[bold green]Balatro Laya Autonomous Bridge Active[/bold green]\n"
             f"API Endpoint: [cyan]{self.endpoint}[/cyan] (HTTP JSON-RPC 2.0)\n"
             "Mod: [green]coder/balatrobot v1.5.2[/green]\n"
-            "Engine: [magenta]Laya ModernBERT-large + Combinatorial Math[/magenta]",
+            "Engine: [magenta]Laya ModernBERT-large + Living Strategy Rulebook[/magenta]",
             title="Laya Balatro Agent"
         ))
         while True:

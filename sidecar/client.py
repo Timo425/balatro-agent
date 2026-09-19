@@ -91,8 +91,28 @@ class BalatroBotClient:
     def buy_card(self, index: int) -> Optional[Dict[str, Any]]:
         return self.send_rpc("buy", {"card": index})
 
+    def buy_pack(self, index: int) -> Optional[Dict[str, Any]]:
+        return self.send_rpc("buy", {"pack": index})
+
+    def buy_voucher(self, index: int) -> Optional[Dict[str, Any]]:
+        return self.send_rpc("buy", {"voucher": index})
+
     def next_round(self) -> Optional[Dict[str, Any]]:
         return self.send_rpc("next_round")
+
+    def rearrange_jokers(self, order: List[int]) -> Optional[Dict[str, Any]]:
+        return self.send_rpc("rearrange", {"jokers": order})
+
+    def use_consumable(self, consumable_idx: int, target_cards: Optional[List[int]] = None) -> Optional[Dict[str, Any]]:
+        params: Dict[str, Any] = {"consumable": consumable_idx}
+        if target_cards:
+            params["cards"] = target_cards
+        return self.send_rpc("use", params)
+
+    def select_pack_card(self, card_idx: Optional[int] = None, skip: bool = False) -> Optional[Dict[str, Any]]:
+        if skip:
+            return self.send_rpc("pack", {"skip": True})
+        return self.send_rpc("pack", {"card": card_idx or 0})
 
     def start_game(self, deck: str = "RED", stake: str = "WHITE") -> Optional[Dict[str, Any]]:
         return self.send_rpc("start", {"deck": deck, "stake": stake})

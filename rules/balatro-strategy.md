@@ -1,63 +1,74 @@
-# Balatro Strategy & Living Rulebook (Complete Reference)
+# Balatro Strategy & Living Rulebook (Complete Operational Reference)
 
-This living reference defines the comprehensive strategy, heuristic scoring models, and decision rubrics for the autonomous Balatro agent. It bridges mathematical hand evaluation and Laya's neural decision engine.
-
----
-
-## 1. Hand Priority & Scoring Table
-
-Score Formula: `(Base Chips + Card Values + Chip Additions) × (Base Mult + Mult Additions) × (X-Mult Multipliers)`
-
-| Hand Type | Base Chips | Base Mult | Priority Tier | Strategy & Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| **Straight Flush** | 100 | 8 | Tier 0 | Devastating high score; play immediately if formed. |
-| **Four of a Kind** | 60 | 7 | Tier 0 | Dominant power hand; scales rapidly with planet cards. |
-| **Flush** | 35 | 4 | Tier 1 (Early Game) | Highest consistency in Ante 1; primary strategy for clearing early blinds. |
-| **Full House** | 40 | 4 | Tier 1 (Power) | Massive base points; prioritize when natural pairs/trips appear. |
-| **Straight** | 30 | 4 | Tier 2 | High score but higher variance; avoid forcing unless open-ended (4-in-a-row). |
-| **Three of a Kind** | 30 | 3 | Tier 2 | Solid fallback when 5-card hands are out of reach. |
-| **Two Pair** | 20 | 2 | Tier 3 | Dependable floor with flat +Mult Jokers; weak without Joker support. |
-| **Pair** | 10 | 2 | Tier 4 | Low base points; only viable with dedicated scaling (e.g. Jolly Joker, Sly Joker). |
-| **High Card** | 5 | 1 | Tier 4 (Late Game) | Requires heavy Planet scaling or Baron/Mime endgame builds. |
+This operational rulebook governs the autonomous Balatro agent. It unifies combinatorial poker evaluations, game engine endpoints, and Laya's neural decision engine into strict, actionable policies.
 
 ---
 
-## 2. Discard Heuristics & Turn Policy
+## RULE 1: Hand Evaluation & Play Priority
 
-1. **The Instant Win Rule:** If the top immediately playable hand scores $\ge$ the remaining blind chips, **PLAY IMMEDIATELY**. Never waste discards when the round is already won.
-2. **Flush Digging:** If holding 3 or 4 cards of one suit and the current best hand does not reach 50% of the target blind, discard the 3 to 5 non-matching cards to dig for the Flush.
-3. **Emergency Discard Conservation:** Always preserve at least 1 discard unless remaining hands are insufficient to clear the blind.
-4. **Boss Blind Counters:**
-   - **The Psychic (Must play 5 cards):** Always pad smaller hands (Pairs, High Card) with junk cards up to 5 cards total.
-   - **The Eye (No repeat hand types):** Track played hands; alternate between Flush, Two Pair, and Full House.
-   - **The Pillar (No repeat cards this Ante):** Discard previously played card ranks.
-   - **The Needle (Play only 1 hand):** Spend all discards searching for your highest-scoring single hand.
+1. **Instant Win Rule (RULE_INSTANT_WIN):**
+   - If the highest-scoring immediately playable hand beats or matches remaining blind chips, **PLAY IMMEDIATELY**.
+   - Never waste discards when the round is already mathematically secured.
 
----
+2. **Flush Digging Heuristic (RULE_FLUSH_DIG):**
+   - If holding $\ge 3$ cards of a single suit and current best hand achieves $< 50\%$ of remaining blind chips, discard up to 5 non-matching cards to dig for the Flush.
 
-## 3. The 4 Pillars of Joker Construction
+3. **Hand Type Tier Hierarchy:**
+   - **Tier 0:** Straight Flush, Four of a Kind (game-winning high multipliers).
+   - **Tier 1:** Flush, Full House (reliable primary scoring engines for Ante 1–4).
+   - **Tier 2:** Straight, Three of a Kind (situational fallbacks).
+   - **Tier 3:** Two Pair (good with flat mult support).
+   - **Tier 4:** Pair, High Card (only viable with heavy scaling or dedicated Jokers).
 
-Every winning Balatro run requires balancing the four fundamental Joker categories:
-
-1. **+Chips:** Creates the foundational chip base (e.g., Blue Joker, Banner, Ice Cream, Bull, Stuntman).
-2. **+Flat Mult:** Required for Ante 1–3 survival (e.g., Gros Michel, Half Joker, Popcorn, Lusty/Greedy/Wrathful Jokers).
-3. **+Scaling Mult:** Permanent growth engine for Ante 4+ (e.g., Ride the Bus, Green Joker, Supernova, Red Card).
-4. **X-Mult:** Exponential multiplier needed for Ante 6–8 (e.g., Cavendish, Card Sharp, Constellation, Blackboard).
-
-### Critical Joker Ordering Rule:
-**Always position +Chips and +Flat Mult to the LEFT, and X-Mult Jokers to the FAR RIGHT.**
-*Reason:* Balatro triggers Jokers sequentially from left to right. Adding mult before multiplying maximizes exponential yield: `(Base + Flat) × X-Mult`.
+4. **Boss Blind Counters (RULE_BOSS_COUNTERS):**
+   - **The Psychic (Must play 5 cards):** Always pad hands with junk cards to exactly 5 cards.
+   - **The Eye (No repeat hand types):** Never play the same poker hand type consecutively.
+   - **The Arm (Decreases hand level):** Focus on one-shotting the blind with your highest-level hand.
+   - **The Needle (Play only 1 hand):** Spend all discards to craft the absolute strongest 5-card hand.
 
 ---
 
-## 4. Shop & Economy Strategy
+## RULE 2: Joker Architecture & Positioning
 
-1. **Interest Management:** Every $5 saved yields $1 interest at round end (max $5 interest at $25).
-   - In Ante 1–2: Spend only on essential survival Jokers. Build cash reserve toward $25.
-   - Once at $\ge \$25$: Spend excess funds above $25 on scaling Jokers, Planet packs, and Tarot packs.
-2. **Booster Pack Evaluation:**
-   - **Buffoon Pack (Jokers):** High priority if open Joker slots exist and current scoring is below blind requirements.
-   - **Celestial Pack (Planets):** Buy to level up your most played hand type (e.g., Jupiter for Flush).
-   - **Arcana Pack (Tarot):** Prioritize suit conversion, card enhancement (Foil/Holographic), or instant cash (Hermit).
-   - **Spectral Pack:** High risk/reward; avoid if it threatens existing key Jokers.
-3. **Reroll Rule:** Never reroll below $25 unless in imminent lethal danger of losing the run.
+Balatro triggers Jokers sequentially from **LEFT to RIGHT**. Positioning directly dictates exponential scoring.
+
+### 4 Joker Pillars:
+1. **+Chips (Left):** Establishes chip foundation (e.g., Blue Joker, Banner, Ice Cream, Bull, Stuntman).
+2. **+Flat Mult (Middle-Left):** Additive mult before multiplying (e.g., Gros Michel, Half Joker, Popcorn, Mystic, Abstract).
+3. **+Scaling Mult (Middle-Right):** Permanent growth engines (e.g., Ride the Bus, Green Joker, Supernova, Red Card).
+4. **X-Mult (Far Right):** Exponential multipliers (e.g., Cavendish, Card Sharp, Constellation, Blackboard, Blueprint, Brainstorm).
+
+### Ordering Policy (RULE_JOKER_ORDER):
+- **ALWAYS arrange:** `[+Chips] -> [+Flat Mult] -> [+Scaling Mult] -> [X-Mult]`.
+- Trigger `rearrange` endpoint immediately whenever a new Joker is purchased or acquired.
+
+---
+
+## RULE 3: Shop & Economy Management
+
+1. **The $25 Interest Threshold (RULE_INTEREST_RESERVE):**
+   - Balatro awards $1 interest per $5 held, capped at $5 interest for $25.
+   - **Ante 1–2 (Survival Phase):** Aggressively buy flat mult Jokers and chips to survive. Do not hoard if under lethal risk.
+   - **Ante 3+ (Compound Interest Phase):** Maintain $\ge \$25$ cash reserve whenever possible. Spend only the surplus above $25 unless a tier-1 Joker or pack appears.
+
+2. **Purchase Priority in Shop (RULE_SHOP_PRIORITY):**
+   - **Priority 1 (Survival/Scaling Jokers):** Fill empty Joker slots with flat mult (early) or X-mult / scaling (mid/late).
+   - **Priority 2 (Vouchers):** Buy economy vouchers (+1 hand, +1 discard, extra shop slot, interest bonus).
+   - **Priority 3 (Booster Packs when $\ge \$25$):**
+     - *Buffoon Pack:* If open Joker slots or seeking X-Mult upgrades.
+     - *Celestial Pack:* Always buy to upgrade Flush (Jupiter) or high-frequency hands.
+     - *Arcana Pack:* Money (Hermit), suit conversion, or card enhancements.
+   - **Priority 4 (Reroll):** Never reroll below $25 unless under lethal threat in the upcoming blind.
+
+---
+
+## RULE 4: Consumables (Planet & Tarot) Usage Policy
+
+1. **Planet Cards (RULE_USE_PLANET):**
+   - Planet cards (Jupiter, Saturn, Earth, Mars, etc.) must be consumed **IMMEDIATELY** via the `use` endpoint to permanently level up base chips and mult. Never let Planet cards clog consumable slots.
+
+2. **Tarot Cards (RULE_USE_TAROT):**
+   - *The Hermit (Doubles money up to $20):* Use immediately if holding $\ge \$10$ or if slot space is needed.
+   - *The Fool:* Use immediately to duplicate the last valuable Planet or Tarot card.
+   - *Suit Converters (Moon, Sun, Star, World):* Use on off-suit cards to build a single-suit Flush deck.
+   - *Enhancements (Empress, Hierophant, Magician):* Apply to Aces and high court cards.
