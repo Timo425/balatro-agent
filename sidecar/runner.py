@@ -102,12 +102,15 @@ class BalatroLayaRunner:
             jokers=current_jokers
         )
 
+        if shop_cards:
+            console.print(f"[bold cyan]Shop inventory ( cash):[/bold cyan] {[c.get('name') for c in shop_cards]}")
+
         decision = self.agent.decide_shop_action(state, shop_cards, max_jokers=max_jokers)
         if decision is not None:
             buy_idx, reasoning = decision
             console.print(f"[bold green]🛒 Shop Action:[/bold green] {reasoning}")
             self.send_cmd(f"BUY_CARD|{buy_idx}")
-            time.sleep(0.4)
+            time.sleep(0.5)
         else:
             console.print(f"[bold yellow]🚪 Shop Phase:[/bold yellow] Ending shop ( bankroll saved).")
             self.send_cmd("END_SHOP")
