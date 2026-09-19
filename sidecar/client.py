@@ -6,7 +6,7 @@ if str(ROOT_DIR) not in sys.path:
 
 import time
 import httpx
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from rich.console import Console
 from rich.panel import Panel
 
@@ -15,13 +15,33 @@ from sidecar.agent import BalatroAgent, BalatroGameState, AgentAction
 
 console = Console()
 
-class BalatroBotClient:
-    """HTTP JSON-RPC 2.0 client communicating with BalatroBot Lua mod."""
+SUIT_MAP = {
+    "H": "Hearts",
+    "D": "Diamonds",
+    "C": "Clubs",
+    "S": "Spades",
+    "Hearts": "Hearts",
+    "Diamonds": "Diamonds",
+    "Clubs": "Clubs",
+    "Spades": "Spades",
+}
 
-    def __init__(self, endpoint: str = "http://127.0.0.1:12345", rules_path: str = "rules/balatro-strategy.md"):
+RANK_MAP = {
+    "T": "10",
+    "Ace": "A",
+    "King": "K",
+    "Queen": "Q",
+    "Jack": "J",
+}
+
+class BalatroBotClient:
+    """HTTP JSON-RPC 2.0 client communicating with coder/balatrobot v1.5.2+."""
+
+    def __init__(self, endpoint: str = "http://127.0.0.1:12346", rules_path: str = "rules/balatro-strategy.md"):
         self.endpoint = endpoint
         self.agent = BalatroAgent(rules_path=rules_path)
         self.rpc_id = 1
+        self.client = httpx.Client(base_url=self.endpoint, timeout=30.0)
 
     def send_rpc(self, method: str, params: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         payload = {
@@ -32,81 +52,91 @@ class BalatroBotClient:
         }
         self.rpc_id += 1
         try:
-            resp = httpx.post(self.endpoint, json=payload, timeout=2.0)
+            resp = self.client.post("/", json=payload)
             if resp.status_code == 200:
                 data = resp.json()
+                if "error" in data:
+                    err = data["error"]
+                    console.print(f"[yellow]RPC Notice ({method}): {err.get('message', err)}[/yellow]")
+                    return None
                 return data.get("result")
+            else:
+                console.print(f"[red]HTTP {resp.status_code} ({method}): {resp.text}[/red]")
+                return None
         except httpx.ConnectError:
             return None
         except Exception as e:
             console.print(f"[red]RPC Error ({method}): {e}[/red]")
             return None
 
-    def get_state(self) -> Optional[Dict[str, Any]]:
-        return self.send_rpc("get_gamestate")
+    def health(self) -> bool:
+        res = self.send_rpc("health")
+        return res is not None and res.get("status") == "ok"
+
+    def get_gamestate(self) -> Optional[Dict[str, Any]]:
+        return self.send_rpc("gamestate")
+
+    def select_blind(self) -> Optional[Dict[str, Any]]:
+        return self.send_rpc("select")
+
+    def play_cards(self, card_indices: List[int]) -> Optional[Dict[str, Any]]:
+        return self.send_rpc("play", {"cards": card_indices})
+
+    def discard_cards(self, card_indices: List[int]) -> Optional[Dict[str, Any]]:
+        return self.send_rpc("discard", {"cards": card_indices})
+
+    def cash_out(self) -> Optional[Dict[str, Any]]:
+        return self.send_rpc("cash_out")
+
+    def buy_card(self, index: int) -> Optional[Dict[str, Any]]:
+        return self.send_rpc("buy", {"card": index})
+
+    def next_round(self) -> Optional[Dict[str, Any]]:
+        return self.send_rpc("next_round")
+
+    def start_game(self, deck: str = "RED", stake: str = "WHITE") -> Optional[Dict[str, Any]]:
+        return self.send_rpc("start", {"deck": deck, "stake": stake})
 
     def parse_state(self, raw_g: Dict[str, Any]) -> BalatroGameState:
-        """Translates BalatroBot JSON-RPC state to BalatroGameState."""
-        raw_hand = raw_g.get("hand", [])
+        """Translates coder/balatrobot gamestate to BalatroGameState."""
+        raw_hand = raw_g.get("hand", {}).get("cards", [])
         hand_cards = []
         for i, c in enumerate(raw_hand):
-            # BalatroBot format: suit string, rank string
-            suit = c.get("suit", "Spades")
-            rank = str(c.get("value", "2"))
+            val_obj = c.get("value", {})
+            raw_suit = val_obj.get("suit", "S")
+            raw_rank = val_obj.get("rank", "2")
+
+            suit = SUIT_MAP.get(raw_suit, raw_suit)
+            rank = RANK_MAP.get(raw_rank, raw_rank)
             hand_cards.append(Card(rank=rank, suit=suit, id=i))
 
-        jokers = [j.get("name", "Joker") for j in raw_g.get("jokers", [])]
+        raw_jokers = raw_g.get("jokers", {}).get("cards", [])
+        jokers = [j.get("label") or j.get("key", "Joker") for j in raw_jokers]
+
+        # Determine current blind requirement
+        blinds = raw_g.get("blinds", {})
+        target_chips = 300
+        blind_name = "Small Blind"
+        for b_key, b_info in blinds.items():
+            status = b_info.get("status", "")
+            if status in ("SELECTING", "CURRENT", "ACTIVE") or b_info.get("selected"):
+                target_chips = b_info.get("chips", 300)
+                blind_name = b_info.get("name", b_key.capitalize() + " Blind")
+                break
+
+        round_info = raw_g.get("round", {})
+        current_chips = round_info.get("chips", 0)
+        hands_left = round_info.get("hands_left", 4)
+        discards_left = round_info.get("discards_left", 3)
 
         return BalatroGameState(
-            ante=raw_g.get("ante", 1),
-            blind_name=raw_g.get("blind", {}).get("name", "Small Blind"),
-            target_chips=raw_g.get("blind", {}).get("chips", 300),
-            current_chips=raw_g.get("chips", 0),
-            hands_left=raw_g.get("hands_left", 4),
-            discards_left=raw_g.get("discards_left", 3),
-            money=raw_g.get("dollars", 4),
+            ante=raw_g.get("ante_num", 1),
+            blind_name=blind_name,
+            target_chips=target_chips,
+            current_chips=current_chips,
+            hands_left=hands_left,
+            discards_left=discards_left,
+            money=raw_g.get("money", 4),
             hand=hand_cards,
             jokers=jokers
         )
-
-    def play_round_step(self, raw_g: Dict[str, Any]) -> bool:
-        """Executes a single game decision using the agent."""
-        state = self.parse_state(raw_g)
-        action: AgentAction = self.agent.decide_hand_action(state)
-
-        console.print(f"[bold cyan]Agent Decision:[/bold cyan] [yellow]{action.action_type}[/yellow] ({action.reasoning})")
-
-        card_indices = [c.id for c in action.cards]
-
-        if action.action_type == "PLAY":
-            res = self.send_rpc("play_hand", {"indices": card_indices})
-            return res is not None
-        elif action.action_type == "DISCARD":
-            res = self.send_rpc("discard_hand", {"indices": card_indices})
-            return res is not None
-
-        return False
-
-    def run_loop(self, poll_interval: float = 1.0):
-        """Main autonomous bot loop."""
-        console.print(Panel.fit("[bold green]BalatroBot Agent Started[/bold green]\nPolling game on " + self.endpoint))
-        while True:
-            raw_state = self.get_state()
-            if not raw_state:
-                console.print("[dim]Waiting for Balatro to be running on " + self.endpoint + "...[/dim]")
-            else:
-                phase = raw_state.get("state", "UNKNOWN")
-                if phase == "ROUND":
-                    self.play_round_step(raw_state)
-                elif phase == "BLIND_SELECT":
-                    console.print("[green]Selecting blind...[/green]")
-                    self.send_rpc("select_blind")
-                elif phase == "SHOP":
-                    console.print("[yellow]In shop. Finishing shop phase...[/yellow]")
-                    self.send_rpc("leave_shop")
-
-            time.sleep(poll_interval)
-
-if __name__ == "__main__":
-    client = BalatroBotClient()
-    client.run_loop()
