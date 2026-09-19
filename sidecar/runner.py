@@ -75,10 +75,8 @@ class BalatroLayaRunner:
         idx_str = ",".join(str(c.id) for c in action.cards)
         if action.action_type == "PLAY":
             self.send_cmd(f"PLAY_HAND|{idx_str}")
-            time.sleep(1.8)
         elif action.action_type == "DISCARD":
             self.send_cmd(f"DISCARD_HAND|{idx_str}")
-            time.sleep(1.5)
 
     def handle_shop_decision(self, raw_g: dict):
         shop = raw_g.get("shop", {})
@@ -107,11 +105,9 @@ class BalatroLayaRunner:
             buy_idx, reasoning = decision
             console.print(f"[bold green]🛒 Shop Action:[/bold green] {reasoning}")
             self.send_cmd(f"BUY_CARD|{buy_idx}")
-            time.sleep(1.8)
         else:
             console.print(f"[bold yellow]🚪 Shop Phase:[/bold yellow] Ending shop ( bankroll saved).")
             self.send_cmd("END_SHOP")
-            time.sleep(1.2)
 
     def run_step(self) -> bool:
         try:
@@ -131,7 +127,6 @@ class BalatroLayaRunner:
             elif waiting_for == "skip_or_select_blind":
                 console.print("[bold cyan]Blind Selection:[/bold cyan] Selecting Blind...")
                 self.send_cmd("SELECT_BLIND")
-                time.sleep(1.5)
                 return True
             elif waiting_for == "sell_jokers":
                 self.send_cmd("SELL_JOKER|")
@@ -169,7 +164,7 @@ class BalatroLayaRunner:
         ))
         while True:
             acted = self.run_step()
-            time.sleep(0.8 if acted else 1.0)
+            time.sleep(0.05 if acted else 0.1)
 
 if __name__ == "__main__":
     runner = BalatroLayaRunner()
