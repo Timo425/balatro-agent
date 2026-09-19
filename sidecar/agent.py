@@ -8,6 +8,8 @@ from typing import List, Dict, Any, Optional, Tuple
 if "HF_HOME" not in os.environ:
     os.environ["HF_HOME"] = "/media/timo/Storage/.cache"
 
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+
 import laya
 from sidecar.poker_eval import PokerEvaluator, Card, EvaluatedHand
 
