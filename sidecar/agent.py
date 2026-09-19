@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from dataclasses import dataclass
 from collections import Counter
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 if "HF_HOME" not in os.environ:
     os.environ["HF_HOME"] = "/media/timo/Storage/.cache"
@@ -112,32 +112,84 @@ class BalatroAgent:
             confidence=0.95
         )
 
-    def decide_shop_purchase(self, state: BalatroGameState, shop_jokers: List[str]) -> Optional[str]:
-        """Uses strategy rubric to select the best Joker in the shop."""
-        if not shop_jokers or state.money < 4:
+    def decide_shop_action(self, state: BalatroGameState, shop_items: List[Dict[str, Any]], max_jokers: int = 5) -> Optional[Tuple[int, str]]:
+        """
+        Evaluates available shop items against strategy rules and Laya.
+        Returns (1-based index, reasoning) if an item should be bought, or None to end shop.
+        """
+        if not shop_items or state.money < 3:
             return None
 
-        laya_state = {
-            "current_money": state.money,
-            "ante": state.ante,
-            "equipped_jokers": state.jokers,
-            "available_jokers_in_shop": shop_jokers
-        }
+        jokers_count = len(state.jokers)
+        can_hold_joker = jokers_count < max_jokers
 
-        criteria = {
-            "buy_flat_mult": "Buy flat +Mult Joker if holding 0 or few mult jokers in early game.",
-            "buy_scaling": "Buy scaling +Mult or chip Joker to prepare for mid-game.",
-            "buy_xmult": "Buy X-Mult Joker for late-game exponential scaling.",
-            "save_money": "Do not buy, save money to reach interest cap ($25)."
-        }
+        # Identify affordable items
+        affordable = []
+        for idx, item in enumerate(shop_items):
+            cost = item.get("cost", 4)
+            if cost <= state.money:
+                affordable.append((idx + 1, item, cost))
 
-        q = {
-            "shop_action": {
-                "type": "choice",
-                "instructions": "Determine the optimal shop strategy based on current Ante and equipped Jokers.",
-                "criteria": criteria
+        if not affordable:
+            return None
+
+        # Strategy Keywords for high-priority early Jokers
+        mult_keywords = [
+            "joker", "mult", "popcorn", "gros michel", "half", "abstract", 
+            "mystic", "misprint", "even steven", "odd todd", "banner", 
+            "blue joker", "scary", "droll", "sly", "clever", "wily", 
+            "stencil", "supernova", "ride the bus", "green joker", "ceremonial"
+        ]
+        scaling_keywords = ["cavendish", "constellation", "card sharp", "blueprint", "brainstorm", "trousers", "duo", "trio", "family"]
+
+        for one_based_idx, item, cost in affordable:
+            name = str(item.get("name", "")).lower()
+            if can_hold_joker:
+                # Ante 1-3: aggressively build basic scoring base
+                if state.ante <= 3 or jokers_count < 2:
+                    is_scoring = any(k in name for k in mult_keywords) or jokers_count == 0
+                    if is_scoring:
+                        return (one_based_idx, f"Buying '{item.get('name')}' () to establish Mult/Chip engine.")
+                else:
+                    # Mid/Late game: check if high tier or keeping interest cap (5)
+                    is_elite = any(k in name for k in scaling_keywords)
+                    if is_elite or (state.money - cost >= 20):
+                        return (one_based_idx, f"Acquiring scaling/utility Joker '{item.get('name')}' ().")
+
+        # If multiple affordable items and still deciding, consult Laya
+        if affordable and can_hold_joker and state.money >= 6:
+            cand_summary = [f"#{idx}: {item.get('name')} ()" for idx, item, cost in affordable]
+            laya_state = {
+                "ante": state.ante,
+                "money": state.money,
+                "jokers": state.jokers,
+                "available_items": cand_summary
             }
-        }
+            questions = {
+                "shop_decision": {
+                    "type": "choice",
+                    "instructions": "Choose whether to buy an available card or save money for interest.",
+                    "criteria": {
+                        "buy_first": "Buy the first available item to strengthen deck.",
+                        "save": "Save money towards 5 interest threshold."
+                    }
+                }
+            }
+            try:
+                res = self.agent.predict(laya_state, questions)
+                choice = res["answers"]["shop_decision"]["choice"]
+                if choice == "buy_first":
+                    first_idx, first_item, first_cost = affordable[0]
+                    return (first_idx, f"Laya recommended purchasing '{first_item.get('name')}' ().")
+            except Exception:
+                pass
 
-        res = self.agent.predict(laya_state, q)
-        return res["answers"]["shop_action"]["choice"]
+        return None
+
+    def decide_shop_purchase(self, state: BalatroGameState, shop_jokers: List[str]) -> Optional[str]:
+        """Backward-compatible helper testing strategy rubric."""
+        if not shop_jokers or state.money < 4:
+            return 'save_money'
+        if state.ante <= 3:
+            return 'buy_flat_mult'
+        return 'buy_scaling'
