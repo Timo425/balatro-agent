@@ -59,6 +59,8 @@ class PokerEvaluator:
 
     @staticmethod
     def identify_hand(cards: List[Card]) -> Tuple[str, List[Card]]:
+        if not cards:
+            return "High Card", []
         """Identifies the poker hand type and returns (hand_name, scoring_cards)."""
         if len(cards) < 5:
             # Sub-5 card evaluation
@@ -127,6 +129,8 @@ class PokerEvaluator:
     @classmethod
     def find_best_playable_hands(cls, full_hand: List[Card], top_k: int = 3) -> List[EvaluatedHand]:
         """Evaluates all 56 combinations in an 8-card hand and ranks by raw score."""
+        if not full_hand:
+            return [EvaluatedHand("High Card", [], 5, 1, 0, 5)]
         n = len(full_hand)
         size = min(5, n)
         all_combos = itertools.combinations(full_hand, size)

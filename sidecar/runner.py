@@ -126,6 +126,8 @@ class BalatroLayaRunner:
                 return False
 
             if waiting_for == "select_cards_from_hand":
+                if not g.get("hand"):
+                    return False
                 self.handle_hand_decision(g)
                 return True
             elif waiting_for == "skip_or_select_blind":
