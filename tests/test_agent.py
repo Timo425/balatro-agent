@@ -108,6 +108,24 @@ class TestPromptBudget(unittest.TestCase):
         ):
             self.assert_fits(question_id, criteria)
 
+    def test_joker_annotations_still_fit(self):
+        """Synergy tags are the longest thing added to an option label."""
+        jokers = [
+            {"label": "Lusty Joker",
+             "value": {"effect": "Played cards with Heart suit give +3 Mult when scored"}},
+            {"label": "Scary Face", "value": {"effect": "Played face cards give +30 Chips"}},
+            {"label": "Banner", "value": {"effect": "+30 Chips for each remaining discard"}},
+        ]
+        hand = [Card("K", "Hearts", 0), Card("K", "Clubs", 1), Card("Q", "Hearts", 2),
+                Card("Q", "Spades", 3), Card("J", "Hearts", 4), Card("9", "Hearts", 5),
+                Card("4", "Clubs", 6), Card("3", "Diamonds", 7)]
+        backend = ScriptedBackend({"dig_for_better_hand": False, "send_filler_cards": False})
+        agent = BalatroAgent(backend=backend, tree_mode=True, poll_mode=False)
+        agent.decide_hand_action(state(hand, blind_name="Boss Blind", target_chips=600),
+                                 raw_g={"hands": {}, "jokers": {"cards": jokers}})
+        for question_id, criteria in backend.log:
+            self.assert_fits(question_id, criteria)
+
     def test_option_count_stays_inside_the_tree_limit(self):
         from sidecar.backends import MAX_OPTIONS_PER_QUESTION
 
