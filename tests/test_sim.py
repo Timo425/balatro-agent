@@ -3,7 +3,7 @@ import unittest
 from sidecar.agent import BalatroAgent
 from sidecar.poker_eval import Card
 from sidecar.sim import JOKER_LIBRARY, BalatroSim, blind_target
-from sidecar.stress import ProbeBackend, run_stress
+from sidecar.stress import ProbeBackend, RecordingBackend, run_stress
 
 
 class TestBlindTargets(unittest.TestCase):
@@ -88,3 +88,30 @@ class TestProbesRankAsExpected(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDecisionRecording(unittest.TestCase):
+    def test_recording_changes_nothing(self):
+        plain = run_stress("label", "tree", range(8), max_ante=3)
+        recorded = run_stress("label", "tree", range(8), max_ante=3, record=True)
+        self.assertEqual(plain.rounds_won, recorded.rounds_won)
+        self.assertEqual(plain.decisions, recorded.decisions)
+
+    def test_rows_carry_the_round_outcome(self):
+        report = run_stress("label", "tree", range(3), max_ante=2, record=True)
+        self.assertTrue(report.rows)
+        for row in report.rows:
+            self.assertIn("won", row)
+            self.assertIn("score_ratio", row)
+            self.assertIn(row["type"], ("choice", "noul", "poll"))
+            self.assertTrue(row["options"])
+
+    def test_recording_forwards_fallback_counts(self):
+        from tests.support import BrokenBackend
+
+        inner = BrokenBackend()
+        wrapper = RecordingBackend(inner)
+        with self.assertRaises(RuntimeError):
+            wrapper.predict_choice("ctx", "q", "i", {"a": "1"})
+        inner.note_fallback()
+        self.assertEqual(wrapper.fallbacks, 1)

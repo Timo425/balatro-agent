@@ -18,6 +18,7 @@ would make Python the player. `tests/test_decision_boundary.py` enforces that.
 """
 
 import argparse
+import json
 import re
 import statistics
 import sys
@@ -130,6 +131,78 @@ class ProbeBackend(BaseBackend):
         return int(match.group(1)) if match else 0
 
 
+class RecordingBackend(BaseBackend):
+    """Wraps a backend and writes every question and answer to a JSONL log.
+
+    It changes no decision -- it forwards each call and records what came back.
+    The point is the training data: a stress run produces (state, question,
+    options, answer) rows, and the simulator knows afterwards whether the round
+    was won, which is exactly the reward signal a fine-tune of a decision model
+    needs. Laya's own model card is blunt that its base checkpoints are near
+    chance on typed decisions until fine-tuned on the target workflow.
+    """
+
+    def __init__(self, inner: BaseBackend):
+        super().__init__()
+        self.inner = inner
+        self.is_tree = inner.is_tree
+        self.wants_full_context = inner.wants_full_context
+        self.rows: List[Dict[str, Any]] = []
+        self.open_rows: List[Dict[str, Any]] = []
+
+    @property
+    def calls(self) -> int:
+        return self.inner.calls
+
+    @calls.setter
+    def calls(self, value: int) -> None:
+        if hasattr(self, "inner"):
+            self.inner.calls = value
+
+    @property
+    def fallbacks(self) -> int:
+        return self.inner.fallbacks
+
+    @fallbacks.setter
+    def fallbacks(self, value: int) -> None:
+        if hasattr(self, "inner"):
+            self.inner.fallbacks = value
+
+    def _record(self, context, question_id, kind, options, answer):
+        row = {
+            "question_id": question_id,
+            "type": kind,
+            "context": context,
+            "options": options,
+            "answer": answer,
+            "confidence": self.inner.last_confidence,
+        }
+        self.rows.append(row)
+        self.open_rows.append(row)
+        return answer
+
+    def close_round(self, seed: int, ante: int, blind: str, won: bool, ratio: float) -> None:
+        """Stamps the rows since the last close with how that round turned out."""
+        for row in self.open_rows:
+            row.update(seed=seed, ante=ante, blind=blind, won=won, score_ratio=round(ratio, 3))
+        self.open_rows = []
+
+    def predict_choice(self, context, question_id, instructions, criteria):
+        answer = self.inner.predict_choice(context, question_id, instructions, criteria)
+        return self._record(context, question_id, "choice", dict(criteria), answer)
+
+    def predict_bool(self, context, question_id, statement, true_desc="", false_desc=""):
+        answer = self.inner.predict_bool(context, question_id, statement, true_desc, false_desc)
+        return self._record(context, question_id, "noul",
+                            {"true": true_desc, "false": false_desc}, answer)
+
+    def rank_options(self, context, question_id, statement_for, criteria):
+        scores = self.inner.rank_options(context, question_id, statement_for, criteria)
+        best = max(scores, key=lambda k: scores[k]) if scores else None
+        self._record(context, question_id, "poll", dict(criteria), best)
+        return scores
+
+
 @dataclass
 class StressReport:
     policy: str
@@ -138,6 +211,7 @@ class StressReport:
     runs: List[RunResult] = field(default_factory=list)
     decisions: int = 0
     fallbacks: int = 0
+    rows: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def illegal_moves(self) -> int:
@@ -188,18 +262,27 @@ def run_stress(
     max_ante: int = 3,
     shared_backend: bool = True,
     node: str = "poll",
+    record: bool = False,
 ) -> StressReport:
     tree = mode == "tree"
     report = StressReport(policy=policy, mode=mode, node=node)
     backend = build_backend(policy, 0, tree) if shared_backend else None
+    if record and backend is not None:
+        backend = RecordingBackend(backend)
     for seed in seeds:
         active = backend or build_backend(policy, seed, tree)
         agent = BalatroAgent(backend=active, tree_mode=tree, poll_mode=(node == "poll" and tree))
         sim = BalatroSim(seed=seed, jokers=jokers)
-        report.runs.append(sim.play_run(agent, max_ante=max_ante))
+        run = sim.play_run(agent, max_ante=max_ante)
+        report.runs.append(run)
+        if isinstance(active, RecordingBackend):
+            for rnd in run.rounds:
+                active.close_round(seed, rnd.ante, rnd.blind, rnd.won,
+                                   rnd.chips / max(1, rnd.target))
     final = backend or active
     report.decisions = final.calls
     report.fallbacks = final.fallbacks
+    report.rows = getattr(final, "rows", [])
     return report
 
 
@@ -215,6 +298,9 @@ def main() -> None:
     parser.add_argument("--max-ante", type=int, default=3)
     parser.add_argument("--jokers", default="", help="Comma-separated keys from JOKER_LIBRARY")
     parser.add_argument("--verbose", action="store_true", help="Print every action of seed 0")
+    parser.add_argument("--dump", default=None, metavar="PATH",
+                        help="Write every question, answer and round outcome to a JSONL "
+                             "file -- reward-labelled data for fine-tuning a decision model")
     args = parser.parse_args()
 
     jokers = [JOKER_LIBRARY[k.strip()] for k in args.jokers.split(",") if k.strip() in JOKER_LIBRARY]
@@ -224,8 +310,17 @@ def main() -> None:
     print(f"Stress: {args.seeds} seeds, up to Ante {args.max_ante}, jokers: {joker_note}\n")
     for mode in modes:
         report = run_stress(policy=args.policy, mode=mode, node=args.node,
-                            seeds=range(args.seeds), jokers=jokers, max_ante=args.max_ante)
+                            seeds=range(args.seeds), jokers=jokers, max_ante=args.max_ante,
+                            record=bool(args.dump))
         print(report.summary())
+        if args.dump:
+            path = Path(args.dump)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a") as handle:
+                for row in report.rows:
+                    handle.write(json.dumps({**row, "mode": mode, "node": args.node,
+                                             "policy": args.policy}) + "\n")
+            print(f"  wrote {len(report.rows)} decisions to {path}")
         if args.verbose and report.runs:
             print("\n  seed 0 trace:")
             for rnd in report.runs[0].rounds:
