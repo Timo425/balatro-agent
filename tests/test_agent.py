@@ -128,5 +128,39 @@ class TestBalatroAgent(unittest.TestCase):
         self.assertEqual(act_type, "SELL")
         self.assertIn("Cavendish", reasoning)
 
+    def test_blind_selection_small_blind(self):
+        state = BalatroGameState(
+            ante=1, blind_name="Small Blind", target_chips=300, current_chips=0,
+            hands_left=4, discards_left=3, money=4, hand=[], jokers=[]
+        )
+        raw_g = {
+            "blinds": {
+                "small": {"type": "SMALL", "status": "SELECT", "name": "Small Blind", "tag_name": "Standard Tag"},
+                "big": {"type": "BIG", "status": "UPCOMING", "name": "Big Blind"},
+                "boss": {"type": "BOSS", "status": "UPCOMING", "name": "The Hook"}
+            }
+        }
+        action, reasoning = self.agent.decide_blind_action(state, raw_g)
+        self.assertEqual(action, "SELECT")
+        self.assertIn("Small Blind", reasoning)
+        self.assertNotIn("Boss", reasoning)
+
+    def test_blind_selection_boss_blind(self):
+        state = BalatroGameState(
+            ante=1, blind_name="Boss Blind", target_chips=1000, current_chips=0,
+            hands_left=4, discards_left=3, money=10, hand=[], jokers=[]
+        )
+        raw_g = {
+            "blinds": {
+                "small": {"type": "SMALL", "status": "DEFEATED", "name": "Small Blind"},
+                "big": {"type": "BIG", "status": "DEFEATED", "name": "Big Blind"},
+                "boss": {"type": "BOSS", "status": "SELECT", "name": "The Hook"}
+            }
+        }
+        action, reasoning = self.agent.decide_blind_action(state, raw_g)
+        self.assertEqual(action, "SELECT")
+        self.assertIn("The Hook", reasoning)
+        self.assertIn("cannot be skipped", reasoning)
+
 if __name__ == "__main__":
     unittest.main()

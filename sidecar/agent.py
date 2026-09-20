@@ -372,17 +372,41 @@ class BalatroAgent:
 
         blinds = raw_g.get("blinds", {})
         current_blind_info = None
-        current_type = "SMALL"
+        current_type = None
 
-        for b_key, b_info in blinds.items():
-            if b_info.get("status") in ("SELECTING", "CURRENT", "ACTIVE") or b_info.get("selected"):
+        # 1. Match by explicit status or selection
+        # Note: balatrobot returns status: "SELECT", "CURRENT", "UPCOMING", "DEFEATED", "SKIPPED"
+        for b_key in ("small", "big", "boss"):
+            b_info = blinds.get(b_key)
+            if not isinstance(b_info, dict):
+                continue
+            st = str(b_info.get("status", "")).upper()
+            if st in ("SELECT", "SELECTING", "CURRENT", "ACTIVE") or b_info.get("selected"):
                 current_blind_info = b_info
                 current_type = b_key.upper()
                 break
 
-        # Cannot skip Boss blind
-        if current_type == "BOSS" or not current_blind_info:
-            return ("SELECT", "Playing Boss blind (cannot skip).")
+        # 2. Fallback: First blind that has not been defeated or skipped
+        if not current_blind_info:
+            for b_key in ("small", "big", "boss"):
+                b_info = blinds.get(b_key)
+                if not isinstance(b_info, dict):
+                    continue
+                st = str(b_info.get("status", "")).upper()
+                if st not in ("DEFEATED", "SKIPPED"):
+                    current_blind_info = b_info
+                    current_type = b_key.upper()
+                    break
+
+        if not current_blind_info:
+            return ("SELECT", "Playing blind (blind info unavailable).")
+
+        current_type = current_type or "SMALL"
+
+        # Boss blind cannot be skipped in Balatro
+        if current_type == "BOSS":
+            boss_name = current_blind_info.get("name") or "Boss Blind"
+            return ("SELECT", f"Playing {boss_name} (Boss blinds cannot be skipped).")
 
         tag_name = (current_blind_info.get("tag_name") or current_blind_info.get("tag") or "").lower()
         tag_desc = current_blind_info.get("tag_effect") or ""
@@ -398,7 +422,7 @@ class BalatroAgent:
         if state.ante == 1 and len(state.jokers) < 2:
             if any(t in tag_name for t in ["negative", "polychrome", "coupon"]):
                 return ("SKIP", f"Skipping blind for elite Ante 1 Tag: '{tag_name}' ({tag_desc}).")
-            return ("SELECT", "Playing Ante 1 blind to earn shop visit and build scoring base.")
+            return ("SELECT", f"Playing Ante 1 {current_type.capitalize()} Blind to earn shop visit and build scoring base.")
 
         # Mid/Late game: If high value tag and deck has scoring engine
         if is_high_value and len(state.jokers) >= 2:
