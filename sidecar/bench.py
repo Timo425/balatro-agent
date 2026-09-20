@@ -417,6 +417,9 @@ class BalatroBenchmark:
 
         runner = BalatroLayaRunner(endpoint=self.endpoint, agent=self.agent)
 
+        # The agent is shared across seeds, so record the counters at the start
+        # and report this run's own deltas rather than a running total.
+        before = self.agent.backend.telemetry()
         start_time = time.time()
         last_ante = 1
         last_round = 1
@@ -453,8 +456,12 @@ class BalatroBenchmark:
             time.sleep(0.1)
 
         elapsed = time.time() - start_time
-        telemetry = self.agent.backend.telemetry()
-        if telemetry.get("fallbacks"):
+        after = self.agent.backend.telemetry()
+        telemetry = {
+            "calls": after.get("calls", 0) - before.get("calls", 0),
+            "fallbacks": after.get("fallbacks", 0) - before.get("fallbacks", 0),
+        }
+        if telemetry["fallbacks"]:
             console.print(
                 f"[bold red]⚠ {telemetry['fallbacks']} fallback decision(s)[/bold red] -- "
                 "the model did not answer and Python picked. This result does not "

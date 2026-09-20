@@ -743,7 +743,8 @@ class BalatroAgent:
         context = self._context(
             blind_brief(state.ante, blind_name,
                         info.get("chips") or info.get("score") or state.target_chips,
-                        state.money, jokers, tag_name, tag_effect),
+                        state.money, jokers, tag_name, tag_effect,
+                        next_blind=self._blind_after(blinds, kind)),
             raw_g,
         )
         skip = self._ask_bool(
@@ -757,6 +758,20 @@ class BalatroAgent:
         if skip:
             return ("SKIP", f"Decision: skip {blind_name} for tag '{tag_name}'")
         return ("SELECT", f"Decision: play {blind_name} for cash and shop.")
+
+    @staticmethod
+    def _blind_after(blinds: Dict[str, Any], kind: str) -> Optional[Dict[str, Any]]:
+        """The blind that would be met instead if this one were skipped."""
+        order = ["SMALL", "BIG", "BOSS"]
+        try:
+            position = order.index(kind.upper())
+        except ValueError:
+            return None
+        for key in order[position + 1:]:
+            info = blinds.get(key.lower())
+            if isinstance(info, dict) and str(info.get("status", "")).upper() not in ("DEFEATED", "SKIPPED"):
+                return info
+        return None
 
     def decide_pack_card(
         self,

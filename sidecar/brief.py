@@ -107,13 +107,34 @@ def blind_brief(
     jokers: Sequence[Dict[str, Any]],
     tag_name: str = "",
     tag_effect: str = "",
+    next_blind: Optional[Dict[str, Any]] = None,
 ) -> str:
+    """What is on offer, and what skipping actually costs.
+
+    `next_blind` is the blind that would come instead. Without it the model is
+    asked to weigh a tag against a blind it cannot see -- skipping the Big Blind
+    means meeting the Boss one shop earlier, which is the whole trade and is not
+    derivable from anything else in the brief.
+    """
     lines = [
         f"Balatro blind choice. Ante {ante}, {blind_name} needs {target} chips.",
         f"You have ${money}.",
         _joker_line(jokers),
     ]
     if tag_name:
+        lines.append("Beating it pays cash and opens a shop. Skipping pays neither.")
         lines.append(f"Skipping gives the tag {tag_name}" + (f": {tag_effect}" if tag_effect else ""))
-        lines.append("Playing gives cash and a shop visit; skipping gives neither.")
+        if next_blind:
+            name = next_blind.get("name") or "the next blind"
+            score = next_blind.get("score") or next_blind.get("chips")
+            effect = (next_blind.get("effect") or "").strip()
+            kind = "the Boss" if str(next_blind.get("type", "")).upper() == "BOSS" else name
+            detail = f"Skip and the next blind is {kind}"
+            if kind != name:
+                detail += f", {name}"
+            if score:
+                detail += f", which needs {score} chips"
+            if effect:
+                detail += f" ({effect})"
+            lines.append(detail + ", with no shop in between.")
     return "\n".join(lines)
