@@ -183,7 +183,8 @@ class TestPlayPathStaysClean(unittest.TestCase):
                 else:
                     continue
                 for mod in names:
-                    self.assertNotIn("stress", mod, f"{name} imports {mod}")
+                    for forbidden in ("stress", "qbench"):
+                        self.assertNotIn(forbidden, mod, f"{name} imports {mod}")
                     self.assertNotIn("sim", mod.split(".")[-1:], f"{name} imports {mod}")
 
     def test_sim_does_not_choose_moves(self):

@@ -24,7 +24,7 @@ imported by the play path; tests/test_decision_boundary.py enforces that.
 
 import argparse
 import json
-import math
+import random
 import re
 import sys
 from collections import defaultdict
@@ -68,6 +68,22 @@ class QResult:
     correct: int = 0
     confidences: List[float] = field(default_factory=list)
     hits: List[int] = field(default_factory=list)
+    given: List[Any] = field(default_factory=list)
+
+    @property
+    def top_answer_share(self) -> float:
+        """Fraction taken by the most common answer.
+
+        A model that answers the same thing whatever the board scores 1.00 here,
+        and its accuracy is then just the base rate of that answer. This is the
+        number that separates "gets it wrong" from "is not reading the question".
+        """
+        if not self.given:
+            return float("nan")
+        counts: Dict[Any, int] = defaultdict(int)
+        for g in self.given:
+            counts[g] += 1
+        return max(counts.values()) / len(self.given)
 
     @property
     def accuracy(self) -> float:
@@ -123,6 +139,19 @@ def _brief(hand: Sequence[Card], needed: int, hands_left: int, discards_left: in
     return "\n".join(lines)
 
 
+def _shuffled(criteria: Dict[str, str], seed: int) -> Dict[str, str]:
+    """Deterministically reorders options so position carries no signal.
+
+    The live tree lists options in the game's fixed hand ranking, where the
+    biggest hand usually comes first. A benchmark that kept that order would hand
+    full marks to any model that simply picks option one, which is the opposite
+    of what is being measured.
+    """
+    keys = list(criteria)
+    random.Random(seed).shuffle(keys)
+    return {k: criteria[k] for k in keys}
+
+
 def build_items(seeds: Sequence[int]) -> List[QItem]:
     """Generates decision items with verifiable answers, labelled and bare."""
     items: List[QItem] = []
@@ -152,7 +181,7 @@ def build_items(seeds: Sequence[int]) -> List[QItem]:
                 context=_brief(hand, needed, 1, 0, pair_options, labelled),
                 instructions="This is the last hand of the round. "
                              "Pick the hand that scores the most chips.",
-                criteria=criteria,
+                criteria=_shuffled(criteria, seed),
                 answer=best.key,
             ))
 
@@ -167,7 +196,7 @@ def build_items(seeds: Sequence[int]) -> List[QItem]:
                 context=_brief(hand, needed, 1, 0, options, labelled),
                 instructions="This is the last hand of the round. "
                              "Pick the hand that scores the most chips.",
-                criteria=criteria_all,
+                criteria=_shuffled(criteria_all, seed + 1),
                 answer=best.key,
             ))
 
@@ -223,6 +252,7 @@ def evaluate(backend: BaseBackend, items: Sequence[QItem]) -> Dict[Tuple[str, st
         bucket.correct += hit
         bucket.confidences.append(backend.last_confidence)
         bucket.hits.append(hit)
+        bucket.given.append(given)
     return results
 
 
@@ -254,8 +284,8 @@ def main() -> None:
 
     print(f"\n{args.backend} on {len(items)} items from {args.seeds} dealt hands\n")
     print(f"{'question':<18} {'variant':<9} {'n':>4} {'accuracy':>9} {'chance':>7} "
-          f"{'confidence':>11} {'ECE':>6}")
-    print("-" * 70)
+          f"{'same answer':>12} {'confidence':>11} {'ECE':>6}")
+    print("-" * 84)
     rows = []
     for kind in ("bigger_of_two", "biggest_of_all", "beats_the_blind", "dig_or_play"):
         for variant in ("labelled", "bare"):
@@ -264,9 +294,11 @@ def main() -> None:
                 continue
             chance = chance_level(items, kind, variant)
             print(f"{kind:<18} {variant:<9} {res.items:>4} {res.accuracy:>8.1%} "
-                  f"{chance:>7.1%} {res.mean_confidence:>11.3f} {res.ece:>6.3f}")
+                  f"{chance:>7.1%} {res.top_answer_share:>11.1%} "
+                  f"{res.mean_confidence:>11.3f} {res.ece:>6.3f}")
             rows.append({"question": kind, "variant": variant, "n": res.items,
                          "accuracy": res.accuracy, "chance": chance,
+                         "top_answer_share": res.top_answer_share,
                          "mean_confidence": res.mean_confidence, "ece": res.ece})
     print()
     if args.json:
