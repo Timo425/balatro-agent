@@ -75,7 +75,7 @@ class TestBalatroAgent(unittest.TestCase):
         ]
         action = self.agent.decide_consumable_action(consumables)
         self.assertIsNotNone(action)
-        idx, reasoning = action
+        idx, targets, reasoning = action
         self.assertEqual(idx, 0)
         self.assertIn("Jupiter", reasoning)
 

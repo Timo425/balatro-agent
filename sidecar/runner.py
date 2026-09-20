@@ -40,11 +40,12 @@ class BalatroLayaRunner:
         if not consumables:
             return False
 
-        decision = self.agent.decide_consumable_action(consumables)
+        hand_cards = self.client.parse_state(raw_g).hand if raw_g.get("hand") else []
+        decision = self.agent.decide_consumable_action(consumables, hand=hand_cards, raw_g=raw_g)
         if decision is not None:
-            idx, reasoning = decision
+            idx, targets, reasoning = decision
             console.print(f"[bold magenta]✨ Consumable Action:[/bold magenta] {reasoning}")
-            self.client.use_consumable(idx)
+            self.client.use_consumable(idx, target_cards=targets)
             time.sleep(0.4)
             return True
         return False
@@ -87,6 +88,8 @@ class BalatroLayaRunner:
         self.check_joker_rearrange(raw_g)
 
         shop_cards_raw = extract_cards_list(raw_g, "shop")
+        vouchers_raw = extract_cards_list(raw_g, "vouchers")
+        packs_raw = extract_cards_list(raw_g, "packs")
         dollars = raw_g.get("money", 0)
         current_jokers = [j.get("label") or j.get("key", "") for j in extract_cards_list(raw_g, "jokers") if isinstance(j, dict)]
         j_obj = raw_g.get("jokers")
@@ -103,6 +106,32 @@ class BalatroLayaRunner:
                 "name": c.get("label") or c.get("key", "Unknown"),
                 "cost": buy_cost,
                 "key": c.get("key", "")
+            })
+
+        for v_idx, v in enumerate(vouchers_raw):
+            if not isinstance(v, dict):
+                continue
+            cost_val = v.get("cost")
+            buy_cost = cost_val.get("buy", 10) if isinstance(cost_val, dict) else (cost_val if isinstance(cost_val, int) else 10)
+            shop_items.append({
+                "name": f"Voucher: {v.get('label') or v.get('key', 'Unknown')}",
+                "cost": buy_cost,
+                "key": v.get("key", ""),
+                "is_voucher": True,
+                "voucher_idx": v_idx,
+            })
+
+        for p_idx, p in enumerate(packs_raw):
+            if not isinstance(p, dict):
+                continue
+            cost_val = p.get("cost")
+            buy_cost = cost_val.get("buy", 6) if isinstance(cost_val, dict) else (cost_val if isinstance(cost_val, int) else 6)
+            shop_items.append({
+                "name": f"Booster: {p.get('label') or p.get('key', 'Pack')}",
+                "cost": buy_cost,
+                "key": p.get("key", ""),
+                "is_pack": True,
+                "pack_idx": p_idx,
             })
 
         state = BalatroGameState(
@@ -137,7 +166,18 @@ class BalatroLayaRunner:
             elif act_type == "BUY":
                 console.print(f"[bold green]🛒 Shop Decision:[/bold green] {reasoning}")
                 console.print(f"[bold green]>> BUYING ITEM AT INDEX:[/bold green] {target_idx}")
-                self.client.buy_card(target_idx)
+                if target_idx < len(shop_items):
+                    item_meta = shop_items[target_idx]
+                    if item_meta.get("is_voucher"):
+                        v_idx = item_meta["voucher_idx"]
+                        console.print(f"[bold green]>> BUYING VOUCHER AT INDEX:[/bold green] {v_idx}")
+                        self.client.buy_voucher(v_idx)
+                    elif item_meta.get("is_pack"):
+                        p_idx = item_meta["pack_idx"]
+                        console.print(f"[bold green]>> BUYING BOOSTER PACK AT INDEX:[/bold green] {p_idx}")
+                        self.client.buy_pack(p_idx)
+                    else:
+                        self.client.buy_card(target_idx)
                 time.sleep(0.5)
                 return
 

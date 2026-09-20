@@ -63,6 +63,50 @@ def find_weakest_joker_index(jokers: List[Dict[str, Any]]) -> Optional[int]:
     return 0
 
 
+
+def get_tarot_targets(name: str, hand: List[Any]) -> Optional[List[int]]:
+    """Calculates valid target card indices in hand for Tarot cards."""
+    if not hand:
+        return None
+    name_l = name.lower()
+
+    # The Sun (convert up to 3 cards to Hearts)
+    if "sun" in name_l:
+        non_hearts = [i for i, c in enumerate(hand) if getattr(c, "suit", "") != "H"]
+        return non_hearts[:3] if non_hearts else [0]
+
+    # The Star / Moon / World (Diamonds, Clubs, Spades)
+    if any(k in name_l for k in ["star", "moon", "world"]):
+        return [0]
+
+    # The Hanged Man (destroys up to 2 cards) - destroy lowest non-hearts
+    if "hanged" in name_l:
+        non_hearts = [i for i, c in enumerate(hand) if getattr(c, "suit", "") != "H"]
+        return non_hearts[:2] if non_hearts else list(range(min(2, len(hand))))
+
+    # The Lovers (converts 1 card to Wild)
+    if "lovers" in name_l:
+        non_hearts = [i for i, c in enumerate(hand) if getattr(c, "suit", "") != "H"]
+        return [non_hearts[0]] if non_hearts else [0]
+
+    # Death (left card becomes right card)
+    if "death" in name_l:
+        return [0, 1] if len(hand) >= 2 else None
+
+    # Strength (increase rank of up to 2 cards)
+    if "strength" in name_l:
+        return list(range(min(2, len(hand))))
+
+    # Enhancements up to 2 cards (Empress, Hierophant, Magician)
+    if any(k in name_l for k in ["empress", "hierophant", "magician"]):
+        return list(range(min(2, len(hand))))
+
+    # Enhancements for 1 card (Chariot, Justice, Tower, Devil)
+    if any(k in name_l for k in ["chariot", "justice", "tower", "devil"]):
+        return [0]
+
+    return None
+
 class BalatroAgent:
     """Autonomous Balatro agent where Laya makes 100% of game decisions."""
 
@@ -235,7 +279,7 @@ class BalatroAgent:
             cost = item.get("cost", 4)
             if cost <= state.money:
                 name = item.get("name", "Item")
-                if can_hold_joker or "voucher" in name.lower() or "planet" in name.lower() or "tarot" in name.lower():
+                if can_hold_joker or any(w in name.lower() for w in ["voucher", "planet", "tarot", "pack", "reroll"]):
                     candidates[f"buy_item_{idx}"] = (
                         "BUY",
                         idx,
@@ -409,8 +453,9 @@ class BalatroAgent:
     def decide_consumable_action(
         self,
         consumables: List[Dict[str, Any]],
+        hand: Optional[List[Any]] = None,
         raw_g: Optional[Dict[str, Any]] = None,
-    ) -> Optional[Tuple[int, str]]:
+    ) -> Optional[Tuple[int, Optional[List[int]], str]]:
         """Presents consumables in inventory to Laya to decide if and when to use them."""
         if not consumables:
             return None
@@ -437,7 +482,9 @@ class BalatroAgent:
             choice = res["answers"]["consumable_action"]["choice"]
             if choice.startswith("use_"):
                 idx = int(choice.split("_")[1])
-                return (idx, f"Laya Decision: {candidates[choice]}")
+                name = consumables[idx].get("label") or consumables[idx].get("key", "")
+                targets = get_tarot_targets(name, hand or [])
+                return (idx, targets, f"Laya Decision: {candidates[choice]} (targets={targets})")
         except Exception:
             pass
 
