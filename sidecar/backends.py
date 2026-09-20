@@ -31,10 +31,21 @@ class BaseBackend(ABC):
 class LayaBackend(BaseBackend):
     """Laya local offline ModernBERT System 1 decision model."""
 
-    def __init__(self, model_name: str = "convaiinnovations/laya", **kwargs):
+    def __init__(
+        self,
+        model_name: str = "convaiinnovations/laya",
+        max_len: int = 512,
+        head_max_len: int = 192,
+        **kwargs,
+    ):
         import laya
         self.model_name = model_name
         self.agent = laya.load(model_name)
+        if max_len != 512:
+            self.agent.cfg["max_len"] = max_len
+        if head_max_len != 192:
+            self.agent.cfg["head_max_len"] = head_max_len
+        self.max_chars = max_len * 4
 
     def predict_choice(
         self,
@@ -50,8 +61,29 @@ class LayaBackend(BaseBackend):
                 "criteria": criteria,
             }
         }
-        res = self.agent.predict(context[:2000], questions)
+        res = self.agent.predict(context[:self.max_chars], questions)
         return res["answers"][question_id]["choice"]
+
+
+class LayaTreeBackend(LayaBackend):
+    """Hierarchical decision tree backend using Laya ModernBERT at 1024 tokens."""
+
+    is_tree = True
+
+    def __init__(
+        self,
+        model_name: str = "convaiinnovations/laya",
+        max_len: int = 1024,
+        head_max_len: int = 256,
+        **kwargs,
+    ):
+        super().__init__(
+            model_name=model_name,
+            max_len=max_len,
+            head_max_len=head_max_len,
+            **kwargs,
+        )
+
 
 
 class ApiLlmBackend(BaseBackend):
@@ -216,10 +248,15 @@ def create_backend(
     """Factory function to instantiate the requested backend."""
     b_type = backend_type.lower()
     if b_type in ("laya", "decision_model"):
-        return LayaBackend(model_name=model or "convaiinnovations/laya")
+        return LayaBackend(model_name=model or "convaiinnovations/laya", **kwargs)
+    elif b_type in ("laya_tree", "tree", "hierarchical"):
+        return LayaTreeBackend(model_name=model or "convaiinnovations/laya", **kwargs)
     elif b_type in ("api", "api_llm", "llm"):
         return ApiLlmBackend(model=model or "gpt-4o", **kwargs)
     elif b_type in ("agentic", "interactive", "manual"):
         return AgenticBackend(**kwargs)
     else:
-        raise ValueError(f"Unknown backend type: '{backend_type}'. Choose 'laya', 'api_llm', or 'agentic'.")
+        raise ValueError(
+            f"Unknown backend type: '{backend_type}'. Choose 'laya', 'laya_tree', 'api_llm', or 'agentic'."
+        )
+

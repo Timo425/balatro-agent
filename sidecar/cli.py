@@ -180,7 +180,7 @@ def cmd_bench_start(args, client):
 
     # Check health / auto-launch
     if not client.health():
-        console.print("[yellow]BalatroBot ei vasta, käivitan Balatro automaatselt...[/yellow]")
+        console.print("[yellow]BalatroBot not responding, launching Balatro automatically...[/yellow]")
         from sidecar.bench import BalatroLauncher
         launcher = BalatroLauncher(
             port=12346,
@@ -190,7 +190,7 @@ def cmd_bench_start(args, client):
         )
         launcher.start()
         if not launcher.wait_for_health(timeout=45.0):
-            console.print("[bold red]Balatro käivitamine ebaõnnestus.[/bold red]")
+            console.print("[bold red]Failed to launch Balatro.[/bold red]")
             return
         time.sleep(5.0)
 

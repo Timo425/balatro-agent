@@ -321,6 +321,10 @@ class BalatroLayaRunner:
         ))
         while True:
             try:
+                raw_state = self.client.get_gamestate()
+                if raw_state and raw_state.get("state") == "GAME_OVER":
+                    console.print(f"\n[bold red]💀 Run Ended (GAME OVER) at Ante {raw_state.get('ante_num', '?')}. Stopping runner to stay at death screen.[/bold red]")
+                    break
                 acted = self.run_step()
                 time.sleep(0.2 if acted else 0.8)
             except KeyboardInterrupt:
@@ -329,6 +333,7 @@ class BalatroLayaRunner:
             except Exception as e:
                 console.print(f"[red]Error in loop: {e}[/red]")
                 time.sleep(1.0)
+
 
 if __name__ == "__main__":
     runner = BalatroLayaRunner()

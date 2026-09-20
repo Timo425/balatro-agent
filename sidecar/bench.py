@@ -288,6 +288,7 @@ class BalatroBenchmark:
         auto_launch: bool = False,
         headless: bool = False,
         fast: bool = True,
+        stay_on_death: bool = True,
     ):
         self.endpoint = endpoint
         self.backend_type = backend
@@ -295,6 +296,7 @@ class BalatroBenchmark:
         self.deck = deck
         self.stake = stake
         self.auto_launch = auto_launch
+        self.stay_on_death = stay_on_death
         self.launcher: Optional[BalatroLauncher] = None
 
         if auto_launch:
@@ -316,15 +318,15 @@ class BalatroBenchmark:
         self.client = BalatroBotClient(endpoint=endpoint, agent=self.agent)
 
     def ensure_game_running(self) -> bool:
-        """Tagab et Balatro jookseb ja BalatroBot vastab."""
+        """Ensures Balatro is running and BalatroBot is responding."""
         if self.client.health():
-            console.print("[bold green]BalatroBot juba jookseb![/bold green]")
+            console.print("[bold green]BalatroBot is already running![/bold green]")
             return True
 
         if not self.launcher:
             console.print(
-                "[bold red]BalatroBot ei vasta ja auto-launch on valjas.[/bold red]\n"
-                "[yellow]Kaevita Balatro kaesitsi voi kasuta --auto-launch lippu.[/yellow]"
+                "[bold red]BalatroBot is not responding and auto-launch is disabled.[/bold red]\n"
+                "[yellow]Launch Balatro manually or use the --auto-launch flag.[/yellow]"
             )
             return False
 
@@ -332,13 +334,13 @@ class BalatroBenchmark:
         if not self.launcher.wait_for_health(timeout=60.0):
             return False
 
-        # Oota et menueu UI taeielikult laadiks (viewed_back, blind_select jne)
-        console.print("[yellow]Ootan menueu taeielikku laadimist...[/yellow]")
+        # Wait for menu UI to fully load
+        console.print("[yellow]Waiting for menu UI to load completely...[/yellow]")
         time.sleep(8.0)
         return True
 
     def ensure_at_menu(self) -> bool:
-        """Tagab et maeng on MENU olekus (start endpoint nouab seda)."""
+        """Ensures game is in MENU state (required by start endpoint)."""
         state = self.client.get_gamestate()
         if not state:
             return False
@@ -347,10 +349,10 @@ class BalatroBenchmark:
         if current == "MENU":
             return True
 
-        console.print(f"[yellow]Praegune olek: {current} -> Navigeerin menuusse...[/yellow]")
+        console.print(f"[yellow]Current state: {current} -> Navigating to menu...[/yellow]")
         result = self.client.send_rpc("menu")
         if result is None:
-            console.print("[red]Menu RPC ebaonnestus[/red]")
+            console.print("[red]Menu RPC failed[/red]")
             return False
 
         for _ in range(20):
@@ -359,7 +361,7 @@ class BalatroBenchmark:
             if state and state.get("state") == "MENU":
                 return True
 
-        console.print("[red]Ei suutnud menuusse navigeerida[/red]")
+        console.print("[red]Failed to navigate to menu[/red]")
         return False
 
     def start_seed_run(self, seed: str) -> bool:
@@ -370,7 +372,7 @@ class BalatroBenchmark:
         )
 
         if not self.ensure_at_menu():
-            console.print("[bold red]Ei saa menuusse[/bold red]")
+            console.print("[bold red]Cannot navigate to menu[/bold red]")
             return False
 
         start_params = {
@@ -379,16 +381,16 @@ class BalatroBenchmark:
             "seed": seed,
         }
 
-        # Retry loogika: menueu UI ei pruugi kohe valmis olla
+        # Retry logic: menu UI might take a moment to be ready
         for attempt in range(5):
             res = self.client.send_rpc("start", start_params)
             if res:
                 time.sleep(0.5)
                 return True
-            console.print(f"[yellow]Start katse {attempt + 1}/5 ebaonnestus, ootan 3s...[/yellow]")
+            console.print(f"[yellow]Start attempt {attempt + 1}/5 failed, waiting 3s...[/yellow]")
             time.sleep(3.0)
 
-        console.print(f"[bold red]Start RPC ebaonnestus koik 5 katset (seed {seed})[/bold red]")
+        console.print(f"[bold red]Start RPC failed all 5 attempts (seed {seed})[/bold red]")
         return False
 
     def run_single_benchmark(self, seed: str) -> Dict[str, Any]:
@@ -441,7 +443,7 @@ class BalatroBenchmark:
             try:
                 runner.run_step()
             except Exception as e:
-                console.print(f"[yellow]Hoiatus: {e}[/yellow]")
+                console.print(f"[yellow]Warning: {e}[/yellow]")
 
             time.sleep(0.1)
 
@@ -469,7 +471,7 @@ class BalatroBenchmark:
         results = []
 
         if not self.ensure_game_running():
-            console.print("[bold red]Maeng ei kaevitunud, katkestamine.[/bold red]")
+            console.print("[bold red]Game failed to launch, aborting.[/bold red]")
             return results
 
         console.print(Panel.fit(
@@ -493,8 +495,11 @@ class BalatroBenchmark:
                         f"Won: {res['won']} | "
                         f"Time: {res['duration_seconds']}s"
                     )
+                    if not res.get("won") and self.stay_on_death:
+                        console.print("\n[bold red]💀 Run Ended (GAME OVER). Stopping so you can inspect the death screen.[/bold red]")
+                        return results
         finally:
-            if self.launcher:
+            if self.launcher and not self.stay_on_death:
                 self.launcher.stop()
 
         self.print_summary(results)
@@ -511,9 +516,10 @@ class BalatroBenchmark:
                     "stake": self.stake,
                     "results": results,
                 }, f, indent=2)
-            console.print(f"[bold green]Tulemused salvestatud: {output_file}[/bold green]")
+            console.print(f"[bold green]Results saved to: {output_file}[/bold green]")
 
         return results
+
 
     def print_summary(self, results: List[Dict[str, Any]]):
         """Prints a Rich table summarizing the benchmark run."""
@@ -584,8 +590,8 @@ Examples:
   PYTHONPATH=. .venv/bin/python sidecar/bench.py --auto-launch --output results.json
 """
     )
-    parser.add_argument("--backend", default="laya", choices=["laya", "api_llm", "agentic"],
-                        help="Decision backend (default: laya)")
+    parser.add_argument("--backend", default="laya", choices=["laya", "laya_tree", "api_llm", "agentic"],
+                        help="Decision backend (default: laya, choices: laya, laya_tree, api_llm, agentic)")
     parser.add_argument("--model", default=None,
                         help="Model identifier (e.g. gpt-4o, claude-3-5-sonnet)")
     parser.add_argument("--seeds", default=None,
@@ -608,11 +614,14 @@ Examples:
                               help="Headless mode (minimal window, no rendering)")
     launch_group.add_argument("--no-fast", action="store_true",
                               help="Disable fast mode (default: fast is ON)")
+    launch_group.add_argument("--no-stay-on-death", action="store_true",
+                              help="Automatically navigate away from death screen instead of staying on it")
 
     args = parser.parse_args()
 
     seed_list = [s.strip() for s in args.seeds.split(",")] if args.seeds else OFFICIAL_BENCHMARK_SEEDS
     fast = not args.no_fast
+    stay_on_death = not args.no_stay_on_death
 
     bench = BalatroBenchmark(
         endpoint=args.endpoint,
@@ -623,7 +632,9 @@ Examples:
         auto_launch=args.auto_launch,
         headless=args.headless,
         fast=fast,
+        stay_on_death=stay_on_death,
     )
+
     bench.run_suite(seeds=seed_list, runs_per_seed=args.runs, output_file=args.output)
 
 
