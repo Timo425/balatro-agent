@@ -66,8 +66,7 @@ HAND_STATE = {
 class TestRunnerSteps(unittest.TestCase):
     def test_selecting_hand_plays_what_the_model_chose(self):
         runner, backend = runner_for(HAND_STATE, {
-            "dig_for_better_hand": False,
-            "which_hand": lambda c: next(k for k in c if k.startswith("flush_")),
+            "which_aim": lambda c: next(k for k in c if k.startswith("play_flush")),
             "send_filler_cards": False,
         })
         self.assertTrue(runner.run_step())
@@ -80,8 +79,7 @@ class TestRunnerSteps(unittest.TestCase):
                                    card("7", "Hearts"), card("4", "Hearts"),
                                    card("2", "Spades"), card("Q", "Clubs"),
                                    card("9", "Diamonds"), card("3", "Spades")]}
-        runner, _ = runner_for(state, {"dig_for_better_hand": True,
-                                       "which_discard": "flush_draw_hearts"})
+        runner, _ = runner_for(state, {"which_aim": "dig_flush_draw_hearts"})
         self.assertTrue(runner.run_step())
         self.assertIn("discard_cards", runner.client.calls)
 
@@ -91,11 +89,11 @@ class TestRunnerSteps(unittest.TestCase):
                  "blinds": {"small": {"status": "SELECT", "name": "Small Blind",
                                       "chips": 300, "tag_name": "Rare Tag"}},
                  "round": {"chips": 0, "hands_left": 4, "discards_left": 3}}
-        runner, _ = runner_for(state, {"skip_blind": True})
+        runner, _ = runner_for(state, {"which_blind_next": "skip_to_next_blind"})
         runner.run_step()
         self.assertIn("skip_blind", runner.client.calls)
 
-        runner, _ = runner_for(state, {"skip_blind": False})
+        runner, _ = runner_for(state, {"which_blind_next": "play_this_blind"})
         runner.run_step()
         self.assertIn("select_blind", runner.client.calls)
 
@@ -152,7 +150,7 @@ class TestRunnerSteps(unittest.TestCase):
         self.assertIn("cash_out", runner.client.calls)
 
     def test_fallbacks_are_announced_once_each(self):
-        runner, backend = runner_for(HAND_STATE, {"dig_for_better_hand": False})
+        runner, backend = runner_for(HAND_STATE, {"which_aim": "play_flush"})
         runner.run_step()
         self.assertEqual(runner._reported_fallbacks, backend.fallbacks)
 

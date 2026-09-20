@@ -60,15 +60,27 @@ class PlayOption:
 
 @dataclass
 class DiscardPlan:
-    """One named way of throwing cards away, described by what it keeps."""
+    """One named way of throwing cards away, named by the hand it is digging for.
+
+    `target_hand` is what the plan is trying to build. Naming it turns the
+    play-or-dig call into a comparison between poker hands -- which is the one
+    thing a pattern matcher with a language prior is reliably good at -- instead
+    of an abstract yes/no about discarding.
+    """
 
     key: str
     discard: List[Card]
     keep_reason: str
+    target_hand: str = ""
 
     def label(self, discards_left: int) -> str:
         thrown = " ".join(c.short for c in self.discard)
         return f"{self.keep_reason}; throw {len(self.discard)} ({thrown})"
+
+    def aim_label(self) -> str:
+        """How this plan reads next to a hand that can be played right now."""
+        aim = self.target_hand or "a better hand"
+        return f"Dig for {aim}: {self.keep_reason}, throw {len(self.discard)}"
 
 
 def _straight_runs(hand: Sequence[Card]) -> List[List[Card]]:
@@ -243,11 +255,12 @@ def enumerate_discard_plans(
     rank_counts = Counter(c.value for c in hand)
     low_first = sorted(hand, key=lambda c: (c.chip_value, c.value))
 
-    def add(key: str, keep: Sequence[Card], reason: str) -> None:
+    def add(key: str, keep: Sequence[Card], reason: str, target: str = "") -> None:
         keep_ids = {c.id for c in keep}
         throw = [c for c in low_first if c.id not in keep_ids][:MAX_DISCARD]
         if throw:
-            plans.append(DiscardPlan(key=key, discard=throw, keep_reason=reason))
+            plans.append(DiscardPlan(key=key, discard=throw, keep_reason=reason,
+                                     target_hand=target))
 
     # Flush draw: three or four of one suit.
     for suit, count in sorted(suit_counts.items(), key=lambda kv: (-kv[1], kv[0])):
@@ -256,7 +269,8 @@ def enumerate_discard_plans(
             away = 5 - count
             add(f"flush_draw_{suit.lower()}",
                 keep,
-                f"keep the {count} {suit}, {away} short of a Flush")
+                f"keep the {count} {suit}, {away} short",
+                target=f"a Flush in {suit}")
             break
 
     # Straight draw: four cards inside a five-rank window.
@@ -275,29 +289,41 @@ def enumerate_discard_plans(
                     keep.append(c)
                     used.add(c.id)
                     break
-        add("straight_draw", keep, "keep the 4 cards in a row, 1 short of a Straight")
+        add("straight_draw", keep, "keep the 4 cards in a row, 1 short",
+            target="a Straight")
 
     # Keep every pair/trip, throw the singles.
     paired = [c for c in hand if rank_counts[c.value] >= 2]
     if paired and len(paired) < len(hand):
         names = ", ".join(sorted({_plural(c.rank) for c in paired}))
-        add("keep_pairs", paired, f"keep the {names}")
+        biggest = max(rank_counts[c.value] for c in paired)
+        distinct = len({c.value for c in paired})
+        if biggest >= 3:
+            target = "Four of a Kind"
+        elif distinct >= 2:
+            target = "a Full House"
+        else:
+            target = "Three of a Kind"
+        add("keep_pairs", paired, f"keep the {names}", target=target)
 
     # Keep the suits the jokers reward.
     for suit in favored_suits or []:
         if suit_counts.get(suit, 0) >= 2:
             keep = [c for c in hand if c.suit == suit]
-            add(f"keep_joker_suit_{suit.lower()}", keep, f"keep the {suit} your jokers reward")
+            add(f"keep_joker_suit_{suit.lower()}", keep,
+                f"keep the {suit} your jokers reward", target=f"more {suit} for your jokers")
             break
 
     # Keep the face cards the jokers reward.
     if favored_face_cards:
         faces = [c for c in hand if c.rank in ("J", "Q", "K")]
         if faces and len(faces) < len(hand):
-            add("keep_faces", faces, "keep the face cards your jokers reward")
+            add("keep_faces", faces, "keep the face cards your jokers reward",
+                target="more face cards for your jokers")
 
     # Always legal: throw the lowest cards.
-    add("throw_lowest", low_first[MAX_DISCARD:], "keep the high cards")
+    add("throw_lowest", low_first[MAX_DISCARD:], "keep the high cards",
+        target="anything better")
 
     seen = set()
     unique: List[DiscardPlan] = []

@@ -62,6 +62,9 @@ class BaseBackend(ABC):
     #: Backends that can read a long markdown gamestate rather than a compact brief.
     wants_full_context: bool = False
     is_tree: bool = False
+    #: Token budget shared by a question's options and instructions. Only the
+    #: local decision model has a real limit here; LLMs and humans do not.
+    head_max_len: int = 4096
 
     def __init__(self) -> None:
         self.calls = 0

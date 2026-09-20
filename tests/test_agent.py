@@ -37,28 +37,29 @@ def state(hand, **overrides):
 
 class TestOptionsOffered(unittest.TestCase):
     def test_a_winning_flush_is_offered_and_labelled_as_a_win(self):
-        backend = ScriptedBackend({"dig_for_better_hand": False, "send_filler_cards": False})
+        backend = ScriptedBackend({"which_aim": "play_flush", "send_filler_cards": False})
         agent = BalatroAgent(backend=backend, tree_mode=True, poll_mode=False)
         agent.decide_hand_action(state(spades_flush_hand()), raw_g={"hands": {}})
-        criteria = backend.asked("which_hand")[0]
-        flush = next(v for k, v in criteria.items() if k.startswith("flush_"))
+        criteria = backend.asked("which_aim")[0]
+        flush = next(v for k, v in criteria.items() if k.startswith("play_flush"))
         self.assertIn("WINS", flush)
 
     def test_flush_draw_is_offered_when_holding_four_of_a_suit(self):
-        backend = ScriptedBackend({"dig_for_better_hand": True})
+        backend = ScriptedBackend({"which_aim": "dig_flush_draw_hearts"})
         agent = BalatroAgent(backend=backend, tree_mode=True, poll_mode=False)
         action = agent.decide_hand_action(state(four_hearts_hand(), target_chips=800),
                                           raw_g={"hands": {}})
         self.assertEqual(action.action_type, "DISCARD")
-        criteria = backend.asked("which_discard")[0]
-        self.assertIn("flush_draw_hearts", criteria)
+        criteria = backend.asked("which_aim")[0]
+        self.assertIn("dig_flush_draw_hearts", criteria)
 
-    def test_no_dig_question_without_discards(self):
+    def test_no_dig_options_without_discards(self):
         backend = ScriptedBackend({"send_filler_cards": False})
         agent = BalatroAgent(backend=backend, tree_mode=True, poll_mode=False)
         agent.decide_hand_action(state(spades_flush_hand(), discards_left=0),
                                  raw_g={"hands": {}})
-        self.assertNotIn("dig_for_better_hand", backend.question_ids)
+        for _, criteria in backend.log:
+            self.assertFalse([k for k in criteria if k.startswith("dig_")])
 
     def test_empty_hand_is_handled(self):
         agent = BalatroAgent(backend=ScriptedBackend(), tree_mode=True)
@@ -89,13 +90,13 @@ class TestPromptBudget(unittest.TestCase):
 
     def test_play_questions_fit_both_checkpoints(self):
         for question_id, criteria in self.collect(
-            spades_flush_hand(), {"dig_for_better_hand": False, "send_filler_cards": False}
+            spades_flush_hand(), {"which_aim": "play_flush", "send_filler_cards": False}
         ):
             self.assert_fits(question_id, criteria)
 
     def test_discard_questions_fit_both_checkpoints(self):
         for question_id, criteria in self.collect(
-            four_hearts_hand(), {"dig_for_better_hand": True}
+            four_hearts_hand(), {"which_aim": "dig_flush_draw_hearts"}
         ):
             self.assert_fits(question_id, criteria)
 
@@ -104,7 +105,7 @@ class TestPromptBudget(unittest.TestCase):
                    Card("8", "Diamonds", 3), Card("7", "Spades", 4), Card("7", "Hearts", 5),
                    Card("6", "Clubs", 6), Card("6", "Diamonds", 7)]
         for question_id, criteria in self.collect(
-            crowded, {"dig_for_better_hand": False, "send_filler_cards": False}
+            crowded, {"which_aim": "play_pair", "send_filler_cards": False}
         ):
             self.assert_fits(question_id, criteria)
 
@@ -119,7 +120,7 @@ class TestPromptBudget(unittest.TestCase):
         hand = [Card("K", "Hearts", 0), Card("K", "Clubs", 1), Card("Q", "Hearts", 2),
                 Card("Q", "Spades", 3), Card("J", "Hearts", 4), Card("9", "Hearts", 5),
                 Card("4", "Clubs", 6), Card("3", "Diamonds", 7)]
-        backend = ScriptedBackend({"dig_for_better_hand": False, "send_filler_cards": False})
+        backend = ScriptedBackend({"which_aim": "play_two_pair", "send_filler_cards": False})
         agent = BalatroAgent(backend=backend, tree_mode=True, poll_mode=False)
         agent.decide_hand_action(state(hand, blind_name="Boss Blind", target_chips=600),
                                  raw_g={"hands": {}, "jokers": {"cards": jokers}})
@@ -133,7 +134,7 @@ class TestPromptBudget(unittest.TestCase):
                    Card("8", "Diamonds", 3), Card("7", "Spades", 4), Card("7", "Hearts", 5),
                    Card("6", "Clubs", 6), Card("6", "Diamonds", 7)]
         for question_id, criteria in self.collect(
-            crowded, {"dig_for_better_hand": False, "send_filler_cards": False}
+            crowded, {"which_aim": "play_pair", "send_filler_cards": False}
         ):
             self.assertLessEqual(len(criteria), MAX_OPTIONS_PER_QUESTION + 1,
                                  f"{question_id} offers {len(criteria)} options")
@@ -173,7 +174,7 @@ class TestOtherDecisions(unittest.TestCase):
         self.assertEqual(decision[0], 1)
 
     def test_boss_blind_is_never_skipped(self):
-        agent = BalatroAgent(backend=ScriptedBackend({"skip_blind": True}))
+        agent = BalatroAgent(backend=ScriptedBackend({"which_blind_next": "skip_to_next_blind"}))
         raw_g = {"blinds": {
             "small": {"status": "DEFEATED", "name": "Small Blind"},
             "big": {"status": "DEFEATED", "name": "Big Blind"},

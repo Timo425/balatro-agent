@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from sidecar.backends import MAX_OPTIONS_PER_QUESTION, BaseBackend, create_backend
+from sidecar.backends import MAX_OPTIONS_PER_QUESTION, BaseBackend, create_backend, head_budget
 from sidecar.brief import blind_brief, discard_brief, hand_brief, shop_brief
 from sidecar.candidates import (
     DiscardPlan,
@@ -165,6 +165,16 @@ class BalatroAgent:
             except Exception:
                 pass
         return brief[: self._get_max_chars()]
+
+    def _fits_head(self, instructions: str, criteria: Dict[str, str]) -> bool:
+        """Whether a question fits the checkpoint's option budget.
+
+        The cap on how many options a node may carry is the token budget, not a
+        round number: past it the model silently loses the instructions and the
+        ends of the options.
+        """
+        limit = getattr(self.backend, "head_max_len", 192)
+        return head_budget(instructions, criteria)["total"] <= limit - 16
 
     def _choose(
         self,
@@ -375,31 +385,72 @@ class BalatroAgent:
         Node 3  send filler? yes/no -- only when the chosen hand is under five cards
         """
         if facts.discards and state.discards_left > 0:
-            # The verdicts go in the statement, not only in the brief: a question's
-            # instructions are never truncated once the options are short, while
-            # the state is cut from the end. Listing them in enumeration order is
-            # an inventory of what exists, not a ranking of it.
-            verdicts = ", ".join(
-                strength_label(o.estimate.total, facts.needed)
-                for o in facts.plays if o.estimate is not None
-            )
-            dig = self._ask_bool(
-                facts.play_context,
-                "dig_for_better_hand",
-                (
-                    f"The hands available right now are rated: {verdicts}. "
-                    f"{state.hands_left} hands and {state.discards_left} discards are left. "
-                    "Should the player throw cards away and draw new ones instead of "
-                    "playing one of those hands?"
-                ),
-                "throw cards away now and draw replacements",
-                "play one of the hands listed above now",
-                on_failure=False,
-            )
-            if dig:
-                return self._tree_discard(state, facts)
+            outcome = self._tree_aim(state, facts)
+            if outcome is not None:
+                return outcome
 
         return self._tree_play(state, facts)
+
+    AIM_QUESTION = "Which poker hand should the player go for?"
+
+    def _tree_aim(self, state: BalatroGameState, facts: HandFacts) -> Optional[AgentAction]:
+        """One question over hands: the ones playable now, and the ones worth digging for.
+
+        Asking "should the player discard?" is a question about a quantity -- is
+        what I have enough -- and the decision model answers those at chance, the
+        same answer every time. Asking "which poker hand do you want to score
+        with, this Two Pair now or a Flush after a discard?" is a comparison
+        between hands, which is the one thing it does well. Same decision, same
+        facts, a shape the model can actually answer.
+
+        Returns None when the question does not fit the option budget, in which
+        case the caller falls back to the narrower per-hand-type tree.
+        """
+        by_type: Dict[str, List[PlayOption]] = {}
+        for opt in facts.plays:
+            by_type.setdefault(opt.hand_type, []).append(opt)
+
+        criteria: Dict[str, str] = {}
+        for hand_type, members in by_type.items():
+            sample = members[0]
+            label = sample.label(facts.needed, state.hands_left)
+            extra = f" ({len(members)} to pick from)" if len(members) > 1 else ""
+            criteria[f"play_{_slug(hand_type)}"] = f"Play now: {label}{extra}"
+        for plan in facts.discards:
+            criteria[f"dig_{plan.key}"] = plan.aim_label()
+
+        if len(criteria) < 2 or not self._fits_head(self.AIM_QUESTION, criteria):
+            return None
+
+        choice = self._choose(facts.play_context, "which_aim", self.AIM_QUESTION, criteria)
+        if choice is None:
+            return self._fallback_play(facts)
+
+        if choice.startswith("dig_"):
+            plan = next((p for p in facts.discards if f"dig_{p.key}" == choice), None)
+            if plan is None:
+                return self._fallback_play(facts)
+            return AgentAction("DISCARD", list(plan.discard),
+                               f"Tree (aim): {plan.aim_label()}", 0.95)
+
+        members = next(
+            (m for t, m in by_type.items() if f"play_{_slug(t)}" == choice), []
+        )
+        if not members:
+            return self._fallback_play(facts)
+        if len(members) == 1:
+            return self._finish_play(state, facts, members[0], "aim")
+
+        picked = self._pick(
+            facts.play_context, "which_hand_of_type",
+            "Pick the hand that scores the most chips towards beating this blind.",
+            self._play_criteria(facts, state, members),
+            statement_for=lambda _key, label: f"The player should play {label}",
+        )
+        chosen = next((o for o in members if o.key == picked), None)
+        if chosen is None:
+            return self._fallback_play(facts)
+        return self._finish_play(state, facts, chosen, "aim")
 
     def _tree_play(self, state: BalatroGameState, facts: HandFacts) -> AgentAction:
         options = facts.plays
@@ -762,16 +813,39 @@ class BalatroAgent:
                         next_blind=self._blind_after(blinds, kind)),
             raw_g,
         )
-        skip = self._ask_bool(
+        # Asked as a comparison of the two blinds rather than as "should you skip
+        # this?": the model answers "which of these is better" far more reliably
+        # than a yes/no about the board, and skipping is exactly the choice of
+        # which blind to meet next.
+        target = info.get("chips") or info.get("score") or state.target_chips
+        next_blind = self._blind_after(blinds, kind) or {}
+        next_name = next_blind.get("name") or "the next blind"
+        next_target = next_blind.get("score") or next_blind.get("chips")
+        next_effect = (next_blind.get("effect") or "").strip()
+        is_boss = str(next_blind.get("type", "")).upper() == "BOSS"
+
+        skip_label = f"{next_name}"
+        if is_boss:
+            skip_label += " (Boss)"
+        if next_target:
+            skip_label += f", needs {next_target} chips"
+        if next_effect:
+            skip_label += f" ({next_effect})"
+        skip_label += f", no shop first, and you take the {tag_name}"
+
+        choice = self._choose(
             context,
-            "skip_blind",
-            f"Should the player skip {blind_name} to take the tag '{tag_name}' instead of playing for cash?",
-            f"skip and take '{tag_name}'",
-            f"play {blind_name} for the cash payout and the shop",
-            on_failure=False,
+            "which_blind_next",
+            "Which blind should the player take on next?",
+            {
+                "play_this_blind": f"{blind_name}, needs {target} chips, pays cash and opens a shop",
+                "skip_to_next_blind": skip_label,
+            },
         )
-        if skip:
+        if choice == "skip_to_next_blind":
             return ("SKIP", f"Decision: skip {blind_name} for tag '{tag_name}'")
+        if choice is None:
+            return ("SELECT", f"FALLBACK (model gave no answer): play {blind_name}.")
         return ("SELECT", f"Decision: play {blind_name} for cash and shop.")
 
     @staticmethod

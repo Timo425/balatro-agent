@@ -162,6 +162,31 @@ zero-shot Laya is clearly above random, roughly level with always taking the
 first option, and far below what the labels themselves support. The tree helps
 it (1.04 vs 0.75) in the same direction it helps the probe.
 
+### What the live game showed: it skips almost every blind
+
+The offline harness has no blind-selection decision -- it plays every blind in
+order. The first live bench run made that gap visible immediately: on the five
+official seeds Laya **skipped the Big Blind four times out of four**, walking
+into the Boss one shop early. Two of those runs died at 474/600 and 460/600,
+and both numbers beat the Big Blind's 450 they had just declined to play.
+
+The first fix was to give the question the facts it was missing. The brief named
+the tag and said playing pays cash, but never said what came instead: the Boss's
+name, its target and its debuff all sit in the gamestate and were not being
+shown. They are now, along with "skipping pays no cash and opens no shop".
+
+It made no difference -- the next run skipped *more*, including the Small Blind,
+and died in Round 1 on most seeds. That is the signature of a question that is
+not being read rather than a question that is missing information, and it lines
+up with the poll result below: both are `noul` questions, and both behave as if
+the answer barely depends on the text.
+
+So the same decision can now be asked either way (`binary_nodes`), and `qbench`
+asks its yes/no items both ways on identical boards, which is what the
+`same answer` column in its output is for: a model that answers the same thing
+whatever the board scores 100% there, and its accuracy is then only the base rate
+of that answer.
+
 ### Node shape: one choice, or a poll of yes/no questions?
 
 `noul` is Laya's strongest primitive (0.857 against 0.733 for `choice` on its own

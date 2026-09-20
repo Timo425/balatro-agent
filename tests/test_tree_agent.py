@@ -24,26 +24,36 @@ def agent_with(answers, **kwargs):
 
 
 class TestTreeShape(unittest.TestCase):
-    def test_play_branch_asks_dig_then_which_hand(self):
+    def test_one_question_covers_playing_and_digging(self):
         hand = [Card("A", "Hearts", 0), Card("K", "Hearts", 1), Card("Q", "Hearts", 2),
                 Card("J", "Hearts", 3), Card("9", "Hearts", 4), Card("2", "Spades", 5),
                 Card("3", "Clubs", 6), Card("4", "Diamonds", 7)]
-        agent, backend = agent_with({"dig_for_better_hand": False,
-                                     "which_hand": lambda c: next(k for k in c if k.startswith("flush_")),
-                                     "send_filler_cards": False})
+        agent, backend = agent_with({"which_aim": "play_flush", "send_filler_cards": False})
         action = agent.decide_hand_action(state(hand), raw_g={"hands": {}})
-        self.assertEqual(backend.question_ids[:2], ["dig_for_better_hand", "which_hand"])
+        self.assertEqual(backend.question_ids[0], "which_aim")
+        offered = backend.asked("which_aim")[0]
+        self.assertTrue(any(k.startswith("play_") for k in offered))
+        self.assertTrue(any(k.startswith("dig_") for k in offered))
         self.assertEqual(len(action.cards), 5)
         self.assertTrue(all(c.suit == "Hearts" for c in action.cards))
 
-    def test_discard_branch_asks_dig_then_which_discard(self):
+    def test_dig_options_are_named_by_the_hand_they_chase(self):
         hand = [Card("K", "Hearts", 0), Card("10", "Hearts", 1), Card("7", "Hearts", 2),
                 Card("4", "Hearts", 3), Card("2", "Spades", 4), Card("Q", "Clubs", 5),
                 Card("9", "Diamonds", 6), Card("3", "Spades", 7)]
-        agent, backend = agent_with({"dig_for_better_hand": True,
-                                     "which_discard": "flush_draw_hearts"})
+        agent, backend = agent_with({"which_aim": "dig_flush_draw_hearts"})
+        agent.decide_hand_action(state(hand, target_chips=800), raw_g={"hands": {}})
+        offered = backend.asked("which_aim")[0]
+        self.assertIn("Flush in Hearts", offered["dig_flush_draw_hearts"])
+
+    def test_choosing_a_dig_discards_the_right_cards(self):
+        hand = [Card("K", "Hearts", 0), Card("10", "Hearts", 1), Card("7", "Hearts", 2),
+                Card("4", "Hearts", 3), Card("2", "Spades", 4), Card("Q", "Clubs", 5),
+                Card("9", "Diamonds", 6), Card("3", "Spades", 7)]
+        agent, backend = agent_with({"which_aim": "dig_flush_draw_hearts"})
         action = agent.decide_hand_action(state(hand, target_chips=800), raw_g={"hands": {}})
-        self.assertEqual(backend.question_ids, ["dig_for_better_hand", "which_discard"])
+        self.assertEqual(action.action_type, "DISCARD")
+        self.assertEqual(backend.question_ids, ["which_aim"])
         self.assertTrue(all(c.suit != "Hearts" for c in action.cards))
 
     def test_single_legal_hand_asks_nothing_extra(self):
@@ -58,19 +68,16 @@ class TestTreeShape(unittest.TestCase):
         crowded = [Card("9", "Spades", 0), Card("9", "Hearts", 1), Card("8", "Clubs", 2),
                    Card("8", "Diamonds", 3), Card("7", "Spades", 4), Card("7", "Hearts", 5),
                    Card("6", "Clubs", 6), Card("6", "Diamonds", 7)]
-        agent, backend = agent_with({"dig_for_better_hand": False,
-                                     "which_hand_type": "pair",
-                                     "send_filler_cards": False})
+        agent, backend = agent_with({"which_aim": "play_pair", "send_filler_cards": False})
         agent.decide_hand_action(state(crowded), raw_g={"hands": {}})
-        self.assertIn("which_hand_type", backend.question_ids)
+        self.assertIn("which_aim", backend.question_ids)
         self.assertIn("which_hand_of_type", backend.question_ids)
-        self.assertNotIn("which_hand", backend.question_ids)
-        for _, criteria in backend.log:
-            self.assertLessEqual(len(criteria), MAX_OPTIONS_PER_QUESTION + 1)
+        offered = backend.asked("which_aim")[0]
+        self.assertTrue(all(k.startswith(("play_", "dig_")) for k in offered))
 
     def test_filler_question_only_for_short_hands(self):
         flush = [Card(r, "Hearts", i) for i, r in enumerate(("A", "K", "Q", "J", "9"))]
-        agent, backend = agent_with({"dig_for_better_hand": False})
+        agent, backend = agent_with({"which_aim": "play_flush"})
         agent.decide_hand_action(state(flush, discards_left=0), raw_g={"hands": {}})
         self.assertNotIn("send_filler_cards", backend.question_ids)
 
@@ -104,7 +111,7 @@ class TestPollNode(unittest.TestCase):
     def test_poll_mode_uses_rank_options(self):
         seen = {}
 
-        backend = ScriptedBackend({"dig_for_better_hand": False, "send_filler_cards": False})
+        backend = ScriptedBackend({"which_aim": "play_pair", "send_filler_cards": False})
 
         def rank(context, question_id, statement_for, criteria):
             seen[question_id] = {k: statement_for(k, v) for k, v in criteria.items()}
@@ -112,11 +119,11 @@ class TestPollNode(unittest.TestCase):
 
         backend.rank_options = rank
         agent = BalatroAgent(backend=backend, tree_mode=True, poll_mode=True)
-        hand = [Card("9", "Spades", 0), Card("9", "Hearts", 1), Card("K", "Clubs", 2),
-                Card("3", "Diamonds", 3)]
+        hand = [Card("9", "Spades", 0), Card("9", "Hearts", 1), Card("8", "Clubs", 2),
+                Card("8", "Diamonds", 3), Card("K", "Clubs", 4), Card("3", "Diamonds", 5)]
         agent.decide_hand_action(state(hand), raw_g={"hands": {}})
-        self.assertIn("which_hand", seen)
-        for statement in seen["which_hand"].values():
+        self.assertIn("which_hand_of_type", seen)
+        for statement in seen["which_hand_of_type"].values():
             self.assertIn("should play", statement)
 
 

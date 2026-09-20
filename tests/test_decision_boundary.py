@@ -40,58 +40,64 @@ class TestEveryOptionIsReachable(unittest.TestCase):
         self.assertTrue(asked, f"{question_id} was never asked")
         return asked[0]
 
-    def test_each_play_option_is_played_when_chosen(self):
-        from sidecar.candidates import enumerate_play_cores
+    def aim_options(self, prefix):
+        return [k for k in self.offered("which_aim") if k.startswith(prefix)]
 
-        state = make_state()
-        by_key = {o.key: o for o in enumerate_play_cores(state.hand)}
-        criteria = self.offered("which_hand", {"dig_for_better_hand": False})
-        self.assertGreater(len(criteria), 1)
-        for key in criteria:
-            backend = ScriptedBackend({"dig_for_better_hand": False, "which_hand": key,
-                                       "send_filler_cards": False})
+    def test_each_hand_type_is_played_when_chosen(self):
+        keys = self.aim_options("play_")
+        self.assertGreater(len(keys), 1)
+        seen = set()
+        for key in keys:
+            backend = ScriptedBackend({"which_aim": key, "send_filler_cards": False})
             agent = BalatroAgent(backend=backend, tree_mode=True, poll_mode=False)
             action = agent.decide_hand_action(make_state(), raw_g={"hands": {}})
             self.assertEqual(action.action_type, "PLAY", key)
-            played = {c.id for c in action.cards}
-            expected = {c.id for c in by_key[key].core}
-            self.assertTrue(expected <= played,
-                            f"answering {key} did not play its cards")
+            seen.add(tuple(sorted(c.id for c in action.cards)))
+        self.assertEqual(len(seen), len(keys),
+                         "two different hand types produced the same move")
 
-    def test_each_play_option_produces_its_own_cards(self):
-        criteria = self.offered("which_hand", {"dig_for_better_hand": False})
-        seen = set()
-        for key in criteria:
-            backend = ScriptedBackend({"dig_for_better_hand": False, "which_hand": key,
+    def test_each_hand_of_a_type_is_reachable(self):
+        from sidecar.candidates import enumerate_play_cores
+
+        by_key = {o.key: o for o in enumerate_play_cores(make_state().hand)}
+        probe = ScriptedBackend({"which_aim": "play_pair", "send_filler_cards": False})
+        BalatroAgent(backend=probe, tree_mode=True, poll_mode=False).decide_hand_action(
+            make_state(), raw_g={"hands": {}})
+        offered = probe.asked("which_hand_of_type")[0]
+        self.assertGreater(len(offered), 1)
+        for key in offered:
+            backend = ScriptedBackend({"which_aim": "play_pair", "which_hand_of_type": key,
                                        "send_filler_cards": False})
             agent = BalatroAgent(backend=backend, tree_mode=True, poll_mode=False)
             action = agent.decide_hand_action(make_state(), raw_g={"hands": {}})
-            seen.add(tuple(sorted(c.id for c in action.cards)))
-        self.assertEqual(len(seen), len(criteria),
-                         "two different answers produced the same move")
+            played = {c.id for c in action.cards}
+            self.assertTrue({c.id for c in by_key[key].core} <= played, key)
 
-    def test_each_discard_plan_is_executed_when_chosen(self):
-        criteria = self.offered("which_discard", {"dig_for_better_hand": True})
+    def test_each_dig_plan_is_executed_when_chosen(self):
+        keys = self.aim_options("dig_")
+        self.assertGreater(len(keys), 1)
         seen = set()
-        for key in criteria:
-            backend = ScriptedBackend({"dig_for_better_hand": True, "which_discard": key})
+        for key in keys:
+            backend = ScriptedBackend({"which_aim": key})
             agent = BalatroAgent(backend=backend, tree_mode=True, poll_mode=False)
             action = agent.decide_hand_action(make_state(), raw_g={"hands": {}})
             self.assertEqual(action.action_type, "DISCARD", key)
             seen.add(tuple(sorted(c.id for c in action.cards)))
-        self.assertEqual(len(seen), len(criteria))
+        self.assertEqual(len(seen), len(keys))
 
-    def test_dig_answer_decides_play_versus_discard(self):
-        for dig, expected in ((True, "DISCARD"), (False, "PLAY")):
-            backend = ScriptedBackend({"dig_for_better_hand": dig, "send_filler_cards": False})
+    def test_the_aim_answer_decides_play_versus_discard(self):
+        dig_key = self.aim_options("dig_")[0]
+        play_key = self.aim_options("play_")[0]
+        for key, expected in ((dig_key, "DISCARD"), (play_key, "PLAY")):
+            backend = ScriptedBackend({"which_aim": key, "send_filler_cards": False})
             agent = BalatroAgent(backend=backend, tree_mode=True, poll_mode=False)
             action = agent.decide_hand_action(make_state(), raw_g={"hands": {}})
             self.assertEqual(action.action_type, expected)
 
     def test_filler_answer_changes_the_cards_played(self):
-        without = ScriptedBackend({"dig_for_better_hand": False, "which_hand": "pair_9",
+        without = ScriptedBackend({"which_aim": "play_pair", "which_hand_of_type": "pair_9",
                                    "send_filler_cards": False})
-        with_filler = ScriptedBackend({"dig_for_better_hand": False, "which_hand": "pair_9",
+        with_filler = ScriptedBackend({"which_aim": "play_pair", "which_hand_of_type": "pair_9",
                                        "send_filler_cards": True})
         a = BalatroAgent(backend=without, tree_mode=True, poll_mode=False).decide_hand_action(
             make_state(), raw_g={"hands": {}})
@@ -102,8 +108,8 @@ class TestEveryOptionIsReachable(unittest.TestCase):
 
     def test_poll_scores_decide_the_hand(self):
         """With polling, the option the model scores highest is the one played."""
-        for wanted in ("pair_9", "pair_8", "high_card"):
-            backend = ScriptedBackend({"dig_for_better_hand": False,
+        for wanted in ("pair_9", "pair_8"):
+            backend = ScriptedBackend({"which_aim": "play_pair",
                                        "send_filler_cards": False})
             backend.rank_options = (
                 lambda ctx, qid, stmt, crit, w=wanted:
@@ -143,8 +149,9 @@ class TestEveryOptionIsReachable(unittest.TestCase):
     def test_blind_skip_answer_is_honoured(self):
         raw_g = {"blinds": {"small": {"status": "SELECT", "name": "Small Blind",
                                       "tag_name": "Negative Tag", "chips": 300}}}
-        for skip, expected in ((True, "SKIP"), (False, "SELECT")):
-            backend = ScriptedBackend({"skip_blind": skip})
+        for answer, expected in (("skip_to_next_blind", "SKIP"),
+                                 ("play_this_blind", "SELECT")):
+            backend = ScriptedBackend({"which_blind_next": answer})
             agent = BalatroAgent(backend=backend, tree_mode=True, poll_mode=False)
             action, _ = agent.decide_blind_action(make_state(hand=[]), raw_g)
             self.assertEqual(action, expected)

@@ -83,6 +83,10 @@ class ProbeBackend(BaseBackend):
         if question_id in ("shop_category", "which_shop_item", "shop_action", "pack_choice",
                            "consumable_action", "sell_joker_for_room", "joker_order"):
             return keys[0]
+        if question_id == "which_blind_next":
+            return "play_this_blind"
+        if question_id == "which_aim":
+            return self._label_aim(criteria, keys)
         if set(keys) == {"yes", "no"}:
             # The same decision asked as a two-option choice.
             return "yes" if self._label_bool(self._last_context, question_id) else "no"
@@ -101,10 +105,32 @@ class ProbeBackend(BaseBackend):
         best = max(scored)
         return best[1] if best[0] >= 0 else keys[0]
 
+    def _label_aim(self, criteria: Dict[str, str], keys: List[str]) -> str:
+        """Play now, or dig, read off the same option text the model sees."""
+        plays = {k: v for k, v in criteria.items() if k.startswith("play_")}
+        digs = {k: v for k, v in criteria.items() if k.startswith("dig_")}
+        winning = [k for k, v in plays.items() if "WINS" in v]
+        if winning:
+            return max(winning, key=lambda k: self._chips(plays[k]))
+        if digs and self._label_bool(self._last_context, "dig_for_better_hand"):
+            return self._best_dig(digs, list(digs))
+        if plays:
+            return max(plays, key=lambda k: self._chips(plays[k]))
+        return keys[0]
+
+    @staticmethod
+    def _best_dig(criteria: Dict[str, str], keys: List[str]) -> str:
+        for wanted in ("Flush", "Straight", "Full House", "Four of a Kind",
+                       "Three of a Kind", "jokers"):
+            for key, text in criteria.items():
+                if wanted in text:
+                    return key
+        return keys[0]
+
     @staticmethod
     def _best_discard(criteria: Dict[str, str], keys: List[str]) -> str:
         """Prefer the draw that is one card short of a made hand, then kept pairs."""
-        for wanted in ("short of a Flush", "short of a Straight", "keep the"):
+        for wanted in ("Flush", "Straight", "keep the"):
             for key, text in criteria.items():
                 if wanted in text:
                     return key
