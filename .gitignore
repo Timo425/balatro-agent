@@ -6,3 +6,4 @@ vendor/
 .pytest_cache/
 logs/
 benchmark_results.json
+.bench_session.json
