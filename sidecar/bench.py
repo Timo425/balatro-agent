@@ -461,6 +461,17 @@ class BalatroBenchmark:
             "calls": after.get("calls", 0) - before.get("calls", 0),
             "fallbacks": after.get("fallbacks", 0) - before.get("fallbacks", 0),
         }
+        for key in ("answered_fast", "escalated"):
+            if key in after:
+                telemetry[key] = after[key] - before.get(key, 0)
+        if telemetry.get("escalated") is not None:
+            handled = telemetry.get("answered_fast", 0)
+            total = handled + telemetry["escalated"]
+            telemetry["escalation_rate"] = round(telemetry["escalated"] / total, 3) if total else 0.0
+            console.print(
+                f"[cyan]Routing:[/cyan] {handled} decisions answered locally, "
+                f"{telemetry['escalated']} escalated to {self.model or 'the LLM'}"
+            )
         if telemetry["fallbacks"]:
             console.print(
                 f"[bold red]⚠ {telemetry['fallbacks']} fallback decision(s)[/bold red] -- "
@@ -473,6 +484,8 @@ class BalatroBenchmark:
             "node": self.node,
             "decisions": telemetry.get("calls", 0),
             "fallbacks": telemetry.get("fallbacks", 0),
+            **{k: v for k, v in telemetry.items()
+               if k in ("answered_fast", "escalated", "escalation_rate")},
             "model": self.model or "default",
             "ante_reached": last_ante,
             "rounds_reached": last_round,
@@ -613,7 +626,8 @@ Examples:
 """
     )
     parser.add_argument("--backend", default="laya_tree",
-                        choices=["laya", "laya_tree", "api_llm", "api_llm_tree", "agentic"],
+                        choices=["laya", "laya_tree", "api_llm", "api_llm_tree",
+                                 "hybrid", "agentic"],
                         help="Decision backend (default: laya_tree, the hierarchical Laya tree)")
     parser.add_argument("--node", default="choice", choices=["choice", "poll"],
                         help="Tree node shape: one choice per node (default), or a "

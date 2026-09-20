@@ -22,7 +22,7 @@ import json
 import os
 import re
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 import httpx
 
@@ -403,6 +403,108 @@ class AgenticBackend(BaseBackend):
         return valid_keys[0]
 
 
+class HybridBackend(BaseBackend):
+    """A cheap local model up front, a frontier LLM behind it.
+
+    qbench says the decision model is excellent at one class of question and at
+    chance on the rest, so pick per question rather than per game: let it answer
+    what it is good at, and escalate the rest. Two things trigger an escalation:
+
+    - the question is not one the fast model has been shown to answer, or
+    - it answered with less conviction than `min_confidence`.
+
+    This does not raise the score -- the slow model still makes every hard call --
+    it lowers what reaching that score costs. Laya answers in ~33 ms on a GPU and
+    ~350 ms on a CPU against seconds and cents for an API call, so the saving is
+    roughly the escalation rate.
+
+    `handled` names the question ids the fast model is trusted with. The default
+    is the hand choice, the only class measured above chance, and nothing else.
+    """
+
+    #: Measured at 93-100% on qbench; everything else was at chance.
+    DEFAULT_HANDLED = ("which_aim", "which_hand", "which_hand_of_type")
+
+    def __init__(
+        self,
+        fast: BaseBackend,
+        slow: BaseBackend,
+        handled: Optional[Sequence[str]] = None,
+        min_confidence: float = 0.15,
+    ):
+        super().__init__()
+        self.fast = fast
+        self.slow = slow
+        self.handled = tuple(self.DEFAULT_HANDLED if handled is None else handled)
+        self.min_confidence = min_confidence
+        self.is_tree = fast.is_tree or slow.is_tree
+        self.wants_full_context = slow.wants_full_context
+        self.head_max_len = fast.head_max_len
+        self.answered_fast = 0
+        self.escalated = 0
+
+    @property
+    def escalation_rate(self) -> float:
+        total = self.answered_fast + self.escalated
+        return self.escalated / total if total else 0.0
+
+    def _try_fast(self, question_id: str, call):
+        """Runs the fast model, or reports that this question is not for it."""
+        if question_id not in self.handled:
+            return None
+        try:
+            answer = call()
+        except Exception:
+            return None
+        confidence = self.fast.last_confidence
+        if confidence is not None and float(confidence) < self.min_confidence:
+            return None
+        self.last_confidence = confidence
+        return (answer,)
+
+    def predict_choice(self, context, question_id, instructions, criteria):
+        self.calls += 1
+        result = self._try_fast(
+            question_id,
+            lambda: self.fast.predict_choice(context, question_id, instructions, criteria),
+        )
+        if result is not None and result[0] in criteria:
+            self.answered_fast += 1
+            return result[0]
+        self.escalated += 1
+        answer = self.slow.predict_choice(context, question_id, instructions, criteria)
+        self.last_confidence = self.slow.last_confidence
+        return answer
+
+    def predict_bool(self, context, question_id, statement, true_desc="", false_desc=""):
+        self.calls += 1
+        result = self._try_fast(
+            question_id,
+            lambda: self.fast.predict_bool(context, question_id, statement, true_desc, false_desc),
+        )
+        if result is not None:
+            self.answered_fast += 1
+            return bool(result[0])
+        self.escalated += 1
+        answer = self.slow.predict_bool(context, question_id, statement, true_desc, false_desc)
+        self.last_confidence = self.slow.last_confidence
+        return bool(answer)
+
+    def note_fallback(self) -> None:
+        super().note_fallback()
+        self.slow.note_fallback()
+
+    def telemetry(self) -> Dict[str, Any]:
+        info = super().telemetry()
+        info.update(
+            answered_fast=self.answered_fast,
+            escalated=self.escalated,
+            escalation_rate=round(self.escalation_rate, 3),
+            fallbacks=self.slow.fallbacks,
+        )
+        return info
+
+
 def create_backend(
     backend_type: str = "laya",
     model: Optional[str] = None,
@@ -420,8 +522,14 @@ def create_backend(
         return ApiLlmBackend(model=model or "gpt-4o", tree=True, **kwargs)
     elif b_type in ("agentic", "interactive", "manual"):
         return AgenticBackend(**kwargs)
+    elif b_type in ("hybrid", "laya_llm"):
+        # Laya answers the hand choice it is good at; the LLM gets everything else.
+        return HybridBackend(
+            fast=LayaTreeBackend(),
+            slow=ApiLlmBackend(model=model or "gpt-4o", tree=True, **kwargs),
+        )
     else:
         raise ValueError(
             f"Unknown backend type: '{backend_type}'. Choose 'laya', 'laya_tree', "
-            f"'api_llm', 'api_llm_tree', or 'agentic'."
+            f"'api_llm', 'api_llm_tree', 'hybrid', or 'agentic'."
         )
