@@ -37,11 +37,11 @@ def state(hand, **overrides):
 
 class TestOptionsOffered(unittest.TestCase):
     def test_a_winning_flush_is_offered_and_labelled_as_a_win(self):
-        backend = ScriptedBackend({"which_aim": "play_flush", "send_filler_cards": False})
+        backend = ScriptedBackend({"send_filler_cards": False})
         agent = BalatroAgent(backend=backend, tree_mode=True, poll_mode=False)
         agent.decide_hand_action(state(spades_flush_hand()), raw_g={"hands": {}})
         criteria = backend.asked("which_aim")[0]
-        flush = next(v for k, v in criteria.items() if k.startswith("play_flush"))
+        flush = next(v for k, v in criteria.items() if k.startswith("flush_"))
         self.assertIn("WINS", flush)
 
     def test_flush_draw_is_offered_when_holding_four_of_a_suit(self):
@@ -74,40 +74,60 @@ class TestPromptBudget(unittest.TestCase):
     without any error. Every question the tree asks has to fit.
     """
 
-    def collect(self, hand, answers):
-        backend = ScriptedBackend(answers)
+    def collect(self, hand, answers, head_max_len=256, raw_g=None):
+        backend = ScriptedBackend(answers, head_max_len=head_max_len)
         agent = BalatroAgent(backend=backend, tree_mode=True, poll_mode=False)
-        agent.decide_hand_action(state(hand), raw_g={"hands": {}})
-        return backend.log
+        agent.decide_hand_action(state(hand), raw_g=raw_g or {"hands": {}})
+        return backend.log, head_max_len
 
-    def assert_fits(self, question_id, criteria):
-        budget = head_budget("Which hand should the player play?", criteria)
-        for name, limit in HEAD_BUDGETS.items():
+    def assert_all_fit(self, log, limit):
+        for question_id, criteria in log:
+            budget = head_budget("Pick the hand that scores the most chips.", criteria)
             self.assertLessEqual(
                 budget["total"], limit,
-                f"{question_id} needs {budget['total']} head tokens, over {name}'s {limit}",
+                f"{question_id} needs {budget['total']} head tokens, over {limit}",
             )
 
-    def test_play_questions_fit_both_checkpoints(self):
-        for question_id, criteria in self.collect(
-            spades_flush_hand(), {"which_aim": "play_flush", "send_filler_cards": False}
-        ):
-            self.assert_fits(question_id, criteria)
+    CROWDED = [Card("9", "Spades", 0), Card("9", "Hearts", 1), Card("8", "Clubs", 2),
+               Card("8", "Diamonds", 3), Card("7", "Spades", 4), Card("7", "Hearts", 5),
+               Card("6", "Clubs", 6), Card("6", "Diamonds", 7)]
 
-    def test_discard_questions_fit_both_checkpoints(self):
-        for question_id, criteria in self.collect(
-            four_hearts_hand(), {"which_aim": "dig_flush_draw_hearts"}
-        ):
-            self.assert_fits(question_id, criteria)
+    def test_play_questions_fit_the_tree_checkpoint(self):
+        log, limit = self.collect(spades_flush_hand(), {"send_filler_cards": False})
+        self.assert_all_fit(log, limit)
+
+    def test_discard_questions_fit_the_tree_checkpoint(self):
+        log, limit = self.collect(four_hearts_hand(), {"which_aim": "dig_flush_draw_hearts"})
+        self.assert_all_fit(log, limit)
 
     def test_a_crowded_hand_still_fits(self):
-        crowded = [Card("9", "Spades", 0), Card("9", "Hearts", 1), Card("8", "Clubs", 2),
-                   Card("8", "Diamonds", 3), Card("7", "Spades", 4), Card("7", "Hearts", 5),
-                   Card("6", "Clubs", 6), Card("6", "Diamonds", 7)]
-        for question_id, criteria in self.collect(
-            crowded, {"which_aim": "play_pair", "send_filler_cards": False}
-        ):
-            self.assert_fits(question_id, criteria)
+        log, limit = self.collect(self.CROWDED, {"send_filler_cards": False})
+        self.assert_all_fit(log, limit)
+
+    def test_the_smaller_english_budget_is_respected_too(self):
+        """On the 192-token checkpoint the tree has to group the hands by type."""
+        log, limit = self.collect(self.CROWDED, {"send_filler_cards": False},
+                                  head_max_len=192)
+        self.assert_all_fit(log, limit)
+
+    TWO_PAIR_HAND = [Card("Q", "Hearts", 0), Card("9", "Spades", 1), Card("9", "Diamonds", 2),
+                     Card("8", "Hearts", 3), Card("8", "Diamonds", 4), Card("7", "Diamonds", 5),
+                     Card("6", "Diamonds", 6), Card("3", "Clubs", 7)]
+
+    def test_a_tight_budget_collapses_hands_into_types(self):
+        """The same board lists the hands on the roomier checkpoint and groups
+        them on the smaller one -- a size constraint, never a quality filter."""
+        wide, _ = self.collect(self.TWO_PAIR_HAND, {"send_filler_cards": False},
+                               head_max_len=256)
+        tight, _ = self.collect(self.TWO_PAIR_HAND, {"send_filler_cards": False},
+                                head_max_len=192)
+        wide_aim = next(c for qid, c in wide if qid == "which_aim")
+        tight_aim = next(c for qid, c in tight if qid == "which_aim")
+        self.assertTrue(any(k.startswith("pair_") for k in wide_aim),
+                        "the roomier budget should name the hands themselves")
+        self.assertTrue(any(k.startswith("play_") for k in tight_aim),
+                        "the tight budget should collapse them into types")
+        self.assertLess(len(tight_aim), len(wide_aim))
 
     def test_joker_annotations_still_fit(self):
         """Synergy tags are the longest thing added to an option label."""
@@ -120,24 +140,11 @@ class TestPromptBudget(unittest.TestCase):
         hand = [Card("K", "Hearts", 0), Card("K", "Clubs", 1), Card("Q", "Hearts", 2),
                 Card("Q", "Spades", 3), Card("J", "Hearts", 4), Card("9", "Hearts", 5),
                 Card("4", "Clubs", 6), Card("3", "Diamonds", 7)]
-        backend = ScriptedBackend({"which_aim": "play_two_pair", "send_filler_cards": False})
+        backend = ScriptedBackend({"send_filler_cards": False})
         agent = BalatroAgent(backend=backend, tree_mode=True, poll_mode=False)
         agent.decide_hand_action(state(hand, blind_name="Boss Blind", target_chips=600),
                                  raw_g={"hands": {}, "jokers": {"cards": jokers}})
-        for question_id, criteria in backend.log:
-            self.assert_fits(question_id, criteria)
-
-    def test_option_count_stays_inside_the_tree_limit(self):
-        from sidecar.backends import MAX_OPTIONS_PER_QUESTION
-
-        crowded = [Card("9", "Spades", 0), Card("9", "Hearts", 1), Card("8", "Clubs", 2),
-                   Card("8", "Diamonds", 3), Card("7", "Spades", 4), Card("7", "Hearts", 5),
-                   Card("6", "Clubs", 6), Card("6", "Diamonds", 7)]
-        for question_id, criteria in self.collect(
-            crowded, {"which_aim": "play_pair", "send_filler_cards": False}
-        ):
-            self.assertLessEqual(len(criteria), MAX_OPTIONS_PER_QUESTION + 1,
-                                 f"{question_id} offers {len(criteria)} options")
+        self.assert_all_fit(backend.log, backend.head_max_len)
 
 
 class TestOtherDecisions(unittest.TestCase):

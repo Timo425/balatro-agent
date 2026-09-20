@@ -12,10 +12,12 @@ class ScriptedBackend(BaseBackend):
     the property that keeps Python out of the driver's seat.
     """
 
-    def __init__(self, answers: Optional[Dict[str, Any]] = None, tree: bool = True):
+    def __init__(self, answers: Optional[Dict[str, Any]] = None, tree: bool = True,
+                 head_max_len: int = 256):
         super().__init__()
         self.answers: Dict[str, Any] = dict(answers or {})
         self.is_tree = tree
+        self.head_max_len = head_max_len
         self.log: List[Tuple[str, Dict[str, str]]] = []
 
     def asked(self, question_id: str) -> List[Dict[str, str]]:

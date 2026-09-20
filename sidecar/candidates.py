@@ -42,19 +42,26 @@ class PlayOption:
     def cards(self) -> List[Card]:
         return self.core + self.filler
 
-    def label(self, needed: int, hands_left: int) -> str:
+    def label(self, needed: int, hands_left: int, compact: bool = False) -> str:
         """Short, non-comparative model-facing text, verdict first.
 
         `WINS - Flush AS KS QS JS 9S: ~340 chips, wins now`. The verdict leads
         because option text is clipped from the end under a tight head budget,
         and a word is a far stronger signal to a pattern matcher than a number.
         It describes this option against the blind, never against the others.
+
+        `compact` drops the pace phrase. It is used when the full labels would
+        overrun the option budget, which would truncate them anyway -- and a
+        deliberate trim keeps every option readable instead of clipping the last
+        few at random.
         """
         cards = " ".join(c.short for c in self.core)
         body = f"{self.hand_type} {cards}"
         if self.estimate is None:
             return body
         verdict = strength_label(self.estimate.total, needed)
+        if compact:
+            return f"{verdict} - {body}: ~{self.estimate.total} chips"
         return f"{verdict} - {body}: {describe_estimate(self.estimate, needed, hands_left)}"
 
 
@@ -77,9 +84,11 @@ class DiscardPlan:
         thrown = " ".join(c.short for c in self.discard)
         return f"{self.keep_reason}; throw {len(self.discard)} ({thrown})"
 
-    def aim_label(self) -> str:
+    def aim_label(self, compact: bool = False) -> str:
         """How this plan reads next to a hand that can be played right now."""
         aim = self.target_hand or "a better hand"
+        if compact:
+            return f"Dig for {aim}, throw {len(self.discard)}"
         return f"Dig for {aim}: {self.keep_reason}, throw {len(self.discard)}"
 
 

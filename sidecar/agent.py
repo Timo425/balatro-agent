@@ -431,16 +431,31 @@ class BalatroAgent:
         for opt in facts.plays:
             by_type.setdefault(opt.hand_type, []).append(opt)
 
-        criteria: Dict[str, str] = {}
-        for hand_type, members in by_type.items():
-            sample = members[0]
-            label = sample.label(facts.needed, state.hands_left)
-            extra = f" ({len(members)} to pick from)" if len(members) > 1 else ""
-            criteria[f"play_{_slug(hand_type)}"] = f"Play now: {label}{extra}"
-        for plan in facts.discards:
-            criteria[f"dig_{plan.key}"] = plan.aim_label()
+        def grouped(compact: bool) -> Dict[str, str]:
+            out: Dict[str, str] = {}
+            for hand_type, members in by_type.items():
+                label = members[0].label(facts.needed, state.hands_left, compact=compact)
+                extra = f" ({len(members)} to pick from)" if len(members) > 1 else ""
+                out[f"play_{_slug(hand_type)}"] = f"{label}{extra}"
+            return out
 
-        if len(criteria) < 2 or not self._fits_head(self.AIM_QUESTION, criteria):
+        def digs(compact: bool) -> Dict[str, str]:
+            return {f"dig_{p.key}": p.aim_label(compact=compact) for p in facts.discards}
+
+        # Listing the hands themselves is the shape the model answers best, so try
+        # that first and give ground only as the option budget demands: group by
+        # hand type, then shorten the labels. Every option survives every step --
+        # what shrinks is how much is said about each, never how many there are.
+        ladder = [
+            {**self._play_criteria(facts, state, facts.plays), **digs(False)},
+            {**grouped(False), **digs(False)},
+            {**grouped(True), **digs(True)},
+        ]
+        criteria = next(
+            (c for c in ladder if len(c) >= 2 and self._fits_head(self.AIM_QUESTION, c)),
+            None,
+        )
+        if criteria is None:
             return None
 
         choice = self._choose(facts.play_context, "which_aim", self.AIM_QUESTION, criteria)
@@ -453,6 +468,10 @@ class BalatroAgent:
                 return self._fallback_play(facts)
             return AgentAction("DISCARD", list(plan.discard),
                                f"Tree (aim): {plan.aim_label()}", 0.95)
+
+        direct = next((o for o in facts.plays if o.key == choice), None)
+        if direct is not None:
+            return self._finish_play(state, facts, direct, "aim")
 
         members = next(
             (m for t, m in by_type.items() if f"play_{_slug(t)}" == choice), []

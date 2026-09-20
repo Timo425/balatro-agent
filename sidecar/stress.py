@@ -107,8 +107,8 @@ class ProbeBackend(BaseBackend):
 
     def _label_aim(self, criteria: Dict[str, str], keys: List[str]) -> str:
         """Play now, or dig, read off the same option text the model sees."""
-        plays = {k: v for k, v in criteria.items() if k.startswith("play_")}
         digs = {k: v for k, v in criteria.items() if k.startswith("dig_")}
+        plays = {k: v for k, v in criteria.items() if not k.startswith("dig_")}
         winning = [k for k, v in plays.items() if "WINS" in v]
         if winning:
             return max(winning, key=lambda k: self._chips(plays[k]))
