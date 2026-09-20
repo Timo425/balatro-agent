@@ -230,6 +230,26 @@ asks its yes/no items both ways on identical boards, which is what the
 whatever the board scores 100% there, and its accuracy is then only the base rate
 of that answer.
 
+### In the actual game
+
+Fifteen seeds -- the five official BalatroBench ones and ten random -- Red deck,
+White stake, `fallbacks: 0` throughout, so every move below was the model's:
+
+| | cleared Ante 1 | cleared Ante 2 | best run |
+| --- | ---: | ---: | --- |
+| before any of this | 0 / 5 | 0 / 5 | died Round 2, 216/300 |
+| after the scoring and context fixes | 1 / 15 | 1 / 15 | Ante 3 |
+| after reshaping the questions | **4 / 15 (27%)** | 1 / 15 | Ante 3, Round 7 |
+
+The blind question moved with it: from 33 skips against 1 play, to 29 against 11.
+It is still the weakest node -- the model answers it at around 0.07 confidence,
+which is a coin flip -- but it is no longer skipping every blind it is offered
+and walking into the Boss a shop early.
+
+So a 421M encoder that has never seen Balatro, doing no arithmetic and never
+generating a token, clears the first Ante about a quarter of the time and has
+cleared the second. That is a long way from Ante 8 and a long way from nothing.
+
 ### Boss blinds: the facts were simply wrong
 
 The offline harness plays ordinary blinds, so two bugs survived until the live

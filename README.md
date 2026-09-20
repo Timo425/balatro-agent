@@ -99,6 +99,11 @@ Mean rounds won on the offline simulator (Red-deck rules, no shop, no jokers):
 | **`laya`** (typed-decisions, zero-shot) | **1.04** | 0.75 |
 | `label` — a fixed reader of the option text | 2.28 | 1.62 |
 
+In the actual game, over 15 seeds (5 official + 10 random, `fallbacks: 0`), it
+clears Ante 1 in **4 runs out of 15** and has cleared Ante 2 once, reaching
+Ante 3 Round 7. Before the scoring fix and the question reshaping it cleared
+Ante 1 zero times out of five.
+
 Zero-shot Laya is above random and roughly level with taking the first option,
 and the tree helps it. It is nowhere near what the labels support, which is what
 its own model card predicts: the base checkpoints score 0.362 on typed decisions
