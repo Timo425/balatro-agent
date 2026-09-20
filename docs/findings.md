@@ -125,13 +125,59 @@ Two things to read out of this:
 model reads, so it measures what the labels are worth, not what a perfect player
 would score.
 
+What that looks like in play — `--policy label --seeds 1 --verbose`, seed 0:
+
+```
+WON  Ante 1 Small Blind: 320/300
+    DISCARD KD JS 4H 5D AD · 2C 8C 7C 6C KC · 9S 10H 3S 8H · 10S JH 6S 5H
+    PLAY 8D JD 7D QD 10D -> 320      (Flush)
+WON  Ante 1 Big Blind: 1120/450
+    DISCARD 9S 8S 6H AH QC · JH 10C 4C 7H 3S · KS 8C 7C 8H · 3D 4D 9H 2C
+    PLAY 9D 8D 7D 10D 6D -> 1120     (Straight Flush)
+WON  Ante 1 Boss Blind: 1120/600
+    DISCARD 10C AD 9C 6D · 4D 2D KC 2C
+    PLAY 7S 6S 8S 9S 10S -> 1120     (Straight Flush)
+```
+
+Four discards spent digging, then one hand that ends the blind — which is how
+Balatro is actually played, and the exact behaviour the old tree never produced
+because it was told a 40-chip pair covered a third of the target.
+
 ---
 
 ## Where Laya itself lands
 
-See the table in the README. The short version: with the scoring fixed, the hand
-visible and the questions inside the budget, zero-shot Laya moves off the random
-floor but stays far below what the labels support.
+`typed-decisions` checkpoint, 24 seeds, no jokers, mean rounds won:
+
+| | Tree | Flat |
+| --- | ---: | ---: |
+| `laya` | **1.04** | 0.75 |
+| beat the first blind | 79% | 71% |
+| cleared Ante 1 | 4% | 0% |
+
+For scale, on the same simulator: `random` 0.70, `first` 0.92, `label` 2.28.
+
+So with the scoring fixed, the hand visible and the questions inside the budget,
+zero-shot Laya is clearly above random, roughly level with always taking the
+first option, and far below what the labels themselves support. The tree helps
+it (1.04 vs 0.75) in the same direction it helps the probe.
+
+### Node shape: one choice, or a poll of yes/no questions?
+
+`noul` is Laya's strongest primitive (0.857 against 0.733 for `choice` on its own
+benchmark) and a two-option question can never overrun the head budget, however
+many candidates there are. So `rank_options` was added: one yes/no per option
+("The player should play WEAK - Pair 9S 9D…"), all in a single batched forward
+pass, and the option Laya scores highest wins. Python compares nothing of its
+own — every number is the model's.
+
+Measured, it was worse: 0.67 against 1.25 for a single choice question over the
+same 12 seeds, and it costs one sequence per option instead of one for the
+question. The plausible reason is that `noul` asks whether a statement holds in
+isolation, so independently-scored options are not calibrated against each other,
+whereas `choice` softmaxes them together. `--node choice` is therefore the
+default and `--node poll` stays available; if the model is ever fine-tuned on
+this workflow the comparison is worth repeating.
 
 That is consistent with what the model card says out loud: the base checkpoints
 score 0.362 on typed decisions against a 0.318 random baseline and a 0.461

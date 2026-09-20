@@ -88,6 +88,32 @@ dropped, so the number is honestly a floor.
 
 ---
 
+## Where things stand
+
+Mean rounds won on the offline simulator (Red-deck rules, no shop, no jokers):
+
+| Player | Tree | Flat |
+| --- | ---: | ---: |
+| `random` | 0.70 | 0.40 |
+| `first` — always option 1 | 0.92 | 0.92 |
+| **`laya`** (typed-decisions, zero-shot) | **1.04** | 0.75 |
+| `label` — a fixed reader of the option text | 2.28 | 1.62 |
+
+Zero-shot Laya is above random and roughly level with taking the first option,
+and the tree helps it. It is nowhere near what the labels support, which is what
+its own model card predicts: the base checkpoints score 0.362 on typed decisions
+against a 0.318 random baseline, and the 0.766 belongs to a checkpoint fine-tuned
+on that benchmark's training split. *"Laya is a fast base to specialise, not a
+zero-shot decision engine."*
+
+So the next step is a fine-tune, and `--dump` produces the data for it: every
+question, its options, the answer, and whether that round was won.
+
+[docs/findings.md](docs/findings.md) has the details, including the four
+mis-scored plays that started this and a trace of the tree being played well.
+
+---
+
 ## Running it
 
 ```bash

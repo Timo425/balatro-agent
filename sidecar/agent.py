@@ -136,7 +136,11 @@ class BalatroAgent:
                 "laya_tree", "tree", "hierarchical", "api_llm_tree", "llm_tree",
             )
         self.tree_mode = tree_mode
-        self.poll_mode = bool(poll_mode) if poll_mode is not None else self.tree_mode
+        # Polling (one yes/no per option, batched) is opt-in. It uses Laya's
+        # strongest primitive, but measured worse than a single choice question on
+        # the offline harness and costs one sequence per option, so `choice` is the
+        # default node shape. See docs/findings.md.
+        self.poll_mode = bool(poll_mode)
         self.analyzer = JokerSynergyAnalyzer()
 
     # ------------------------------------------------------------------

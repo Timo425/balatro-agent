@@ -289,7 +289,7 @@ class BalatroBenchmark:
         headless: bool = False,
         fast: bool = True,
         stay_on_death: bool = True,
-        node: str = "poll",
+        node: str = "choice",
     ):
         self.endpoint = endpoint
         self.backend_type = backend
@@ -608,8 +608,9 @@ Examples:
     parser.add_argument("--backend", default="laya_tree",
                         choices=["laya", "laya_tree", "api_llm", "api_llm_tree", "agentic"],
                         help="Decision backend (default: laya_tree, the hierarchical Laya tree)")
-    parser.add_argument("--node", default="poll", choices=["poll", "choice"],
-                        help="Tree node shape: batched yes/no poll (default) or one wide choice")
+    parser.add_argument("--node", default="choice", choices=["choice", "poll"],
+                        help="Tree node shape: one choice per node (default), or a "
+                             "batched yes/no poll over the options")
     parser.add_argument("--model", default=None,
                         help="Model identifier (e.g. gpt-4o, claude-3-5-sonnet)")
     parser.add_argument("--seeds", default=None,

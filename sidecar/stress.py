@@ -207,7 +207,7 @@ class RecordingBackend(BaseBackend):
 class StressReport:
     policy: str
     mode: str
-    node: str = "poll"
+    node: str = "choice"
     runs: List[RunResult] = field(default_factory=list)
     decisions: int = 0
     fallbacks: int = 0
@@ -261,7 +261,7 @@ def run_stress(
     jokers: Optional[Sequence[SimJoker]] = None,
     max_ante: int = 3,
     shared_backend: bool = True,
-    node: str = "poll",
+    node: str = "choice",
     record: bool = False,
 ) -> StressReport:
     tree = mode == "tree"
@@ -292,8 +292,8 @@ def main() -> None:
                         choices=["label", "first", "random", "laya"],
                         help="Probe policy, or 'laya' for the real decision model")
     parser.add_argument("--mode", default="both", choices=["tree", "flat", "both"])
-    parser.add_argument("--node", default="poll", choices=["poll", "choice"],
-                        help="Tree node shape: batched yes/no poll, or one wide choice")
+    parser.add_argument("--node", default="choice", choices=["choice", "poll"],
+                        help="Tree node shape: one choice per node, or a batched yes/no poll")
     parser.add_argument("--seeds", type=int, default=20)
     parser.add_argument("--max-ante", type=int, default=3)
     parser.add_argument("--jokers", default="", help="Comma-separated keys from JOKER_LIBRARY")
