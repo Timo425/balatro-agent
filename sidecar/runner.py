@@ -11,7 +11,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from sidecar.client import BalatroBotClient, extract_cards_list
-from sidecar.agent import BalatroGameState, AgentAction
+from sidecar.agent import BalatroAgent, BalatroGameState, AgentAction
 
 console = Console()
 
@@ -55,9 +55,12 @@ class BalatroLayaRunner:
         if decision is not None:
             idx, targets, reasoning = decision
             console.print(f"[bold magenta]✨ Consumable Action:[/bold magenta] {reasoning}")
-            self.client.use_consumable(idx, target_cards=targets)
+            res = self.client.use_consumable(idx, target_cards=targets)
             time.sleep(0.4)
-            return True
+            if res is not None and not (isinstance(res, dict) and 'error' in res):
+                return True
+            console.print(f"[yellow]Consumable use ei onnestunud: {res}[/yellow]")
+            return False
         return False
 
     def handle_hand_decision(self, raw_g: dict):

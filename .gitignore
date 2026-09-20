@@ -4,3 +4,5 @@ __pycache__/
 *.py[cod]
 vendor/
 .pytest_cache/
+logs/
+benchmark_results.json

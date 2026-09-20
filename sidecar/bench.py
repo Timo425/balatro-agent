@@ -7,11 +7,18 @@ Official BalatroBench Specifications:
 - Stake: White Stake (WHITE)
 - Seeds: AAAAAAA, BBBBBBB, CCCCCCC, DDDDDDD, EEEEEEE
 - Success Metric: Average Rounds Reached (out of 24 rounds for Ante 8 Boss Blind defeat)
+
+Automated Game Launch:
+- Detects Steam/Proton/Balatro paths automatically
+- Launches Balatro.exe via Proton with BalatroBot mod env vars
+- Waits for health endpoint before starting runs
+- Cleans up via wineserver -k after completion
 """
 
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -41,6 +48,231 @@ OFFICIAL_BENCHMARK_SEEDS = [
     "EEEEEEE",
 ]
 
+BALATRO_APP_ID = "2379780"
+
+# ---------------------------------------------------------------------------
+# Steam / Proton automaatne tuvastamine
+# ---------------------------------------------------------------------------
+
+def detect_steam_root() -> Optional[Path]:
+    """Otsib Steam installatsioonitekauste."""
+    home = Path.home()
+    candidates = [
+        home / ".local/share/Steam",
+        home / ".steam/steam",
+        home / ".steam/debian-installation",
+    ]
+    for p in candidates:
+        if (p / "steamapps").is_dir():
+            return p
+    return None
+
+
+def detect_proton_path(steam_root: Path) -> Optional[Path]:
+    """Leiab esimese saadaoleva Proton executable."""
+    common = steam_root / "steamapps/common"
+    if not common.is_dir():
+        return None
+    for d in sorted(common.iterdir(), reverse=True):
+        proton = d / "proton"
+        if proton.is_file() and "proton" in d.name.lower():
+            return proton
+    return None
+
+
+def detect_compat_data(steam_root: Path) -> Optional[Path]:
+    """Leiab Balatro compat data kausta."""
+    p = steam_root / f"steamapps/compatdata/{BALATRO_APP_ID}"
+    return p if p.is_dir() else None
+
+
+def detect_balatro_exe(steam_root: Path) -> Optional[Path]:
+    """Leiab Balatro.exe."""
+    exe = steam_root / "steamapps/common/Balatro/Balatro.exe"
+    return exe if exe.is_file() else None
+
+
+class BalatroLauncher:
+    """Kaevitab Balatro otse Protoni kaudu (ilma Steam kliendita).
+
+    Kasutab sama meetodit mis ametlik BalatroBot Python launcher:
+    proton run Balatro.exe koos vajalike env varidega.
+    """
+
+    def __init__(
+        self,
+        port: int = 12346,
+        headless: bool = False,
+        fast: bool = True,
+        audio: bool = False,
+        gamespeed: int = 10,
+    ):
+        self.port = port
+        self.headless = headless
+        self.fast = fast
+        self.audio = audio
+        self.gamespeed = gamespeed
+        self.process: Optional[subprocess.Popen] = None
+        self.log_path: Optional[Path] = None
+
+        # Automaatne tuvastamine
+        self.steam_root = detect_steam_root()
+        if not self.steam_root:
+            raise RuntimeError(
+                "Steam installatsiooni ei leitud. "
+                "Otsiti: ~/.local/share/Steam, ~/.steam/steam, ~/.steam/debian-installation"
+            )
+
+        self.proton_path = detect_proton_path(self.steam_root)
+        if not self.proton_path:
+            raise RuntimeError("Proton executable ei leitud Steam common kaustas.")
+
+        self.compat_data = detect_compat_data(self.steam_root)
+        if not self.compat_data:
+            raise RuntimeError(f"Balatro compat data ei leitud (app {BALATRO_APP_ID}).")
+
+        self.balatro_exe = detect_balatro_exe(self.steam_root)
+        if not self.balatro_exe:
+            raise RuntimeError("Balatro.exe ei leitud Steam common/Balatro kaustas.")
+
+        # Lovely (version.dll) kontroll
+        lovely_dll = self.balatro_exe.parent / "version.dll"
+        if not lovely_dll.is_file():
+            console.print("[yellow]version.dll (Lovely injector) ei leitud - modid ei pruugi laadida![/yellow]")
+
+    def _build_env(self) -> Dict[str, str]:
+        """Ehitab env dict Protoni ja BalatroBot jaoks."""
+        env = os.environ.copy()
+
+        # Proton nouded
+        env["WINEDLLOVERRIDES"] = "version=n,b"
+        env["PROTON_ENABLE_NVAPI"] = "1"
+        env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = str(self.steam_root)
+        env["STEAM_COMPAT_DATA_PATH"] = str(self.compat_data)
+
+        # BalatroBot mod seadistused
+        env["BALATROBOT_PORT"] = str(self.port)
+        env["BALATROBOT_HOST"] = "127.0.0.1"
+
+        if self.fast:
+            env["BALATROBOT_FAST"] = "1"
+        if self.headless:
+            env["BALATROBOT_HEADLESS"] = "1"
+        if not self.audio:
+            env["BALATROBOT_AUDIO"] = "0"
+
+        env["BALATROBOT_GAMESPEED"] = str(self.gamespeed)
+
+        return env
+
+    def start(self) -> None:
+        """Kaevitab Balatro Protoni kaudu."""
+        if self.process is not None:
+            raise RuntimeError("Balatro on juba kaevitatud!")
+
+        env = self._build_env()
+        cmd = [str(self.proton_path), "run", str(self.balatro_exe)]
+
+        # Logi fail
+        log_dir = ROOT_DIR / "logs" / "bench"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.log_path = log_dir / f"balatro_{timestamp}_port{self.port}.log"
+
+        console.print(Panel.fit(
+            f"[bold cyan]Kaevitan Balatro...[/bold cyan]\n"
+            f"Proton: [dim]{self.proton_path}[/dim]\n"
+            f"Exe: [dim]{self.balatro_exe}[/dim]\n"
+            f"Port: [yellow]{self.port}[/yellow] | "
+            f"Fast: {'[green]YES[/green]' if self.fast else '[red]NO[/red]'} | "
+            f"Headless: {'[green]YES[/green]' if self.headless else '[red]NO[/red]'} | "
+            f"Audio: {'[green]YES[/green]' if self.audio else '[red]NO[/red]'}",
+            border_style="cyan"
+        ))
+
+        with open(self.log_path, "w") as log_file:
+            self.process = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+            )
+
+        console.print(f"[dim]PID: {self.process.pid} | Logi: {self.log_path}[/dim]")
+
+    def wait_for_health(self, timeout: float = 60.0) -> bool:
+        """Ootab kuni BalatroBot health endpoint vastab."""
+        import httpx
+
+        url = f"http://127.0.0.1:{self.port}"
+        payload = {"jsonrpc": "2.0", "method": "health", "params": {}, "id": 1}
+        start_time = time.time()
+
+        console.print(f"[bold yellow]Ootan BalatroBot serverit pordil {self.port}...[/bold yellow]")
+
+        while time.time() - start_time < timeout:
+            if self.process and self.process.poll() is not None:
+                console.print(f"[bold red]Balatro protsess suri (exit code: {self.process.returncode})[/bold red]")
+                if self.log_path:
+                    console.print(f"[dim]Vaata logi: {self.log_path}[/dim]")
+                return False
+
+            try:
+                with httpx.Client(timeout=2.0) as client:
+                    resp = client.post(url, json=payload)
+                    data = resp.json()
+                    if "result" in data and data["result"].get("status") == "ok":
+                        elapsed = round(time.time() - start_time, 1)
+                        console.print(f"[bold green]BalatroBot server vastab! ({elapsed}s)[/bold green]")
+                        return True
+            except (httpx.ConnectError, httpx.TimeoutException, Exception):
+                pass
+
+            time.sleep(0.5)
+
+        console.print(f"[bold red]Health check timeout ({timeout}s)[/bold red]")
+        return False
+
+    def stop(self) -> None:
+        """Peatab Balatro ja puhastab Wine protsessid."""
+        if self.process is None:
+            return
+
+        console.print("[bold yellow]Peatan Balatro...[/bold yellow]")
+
+        # wineserver -k puhastab koik Wine protsessid selles prefixis
+        wineserver = self.proton_path.parent / "files" / "bin" / "wineserver"
+        if wineserver.is_file() and self.compat_data:
+            wineprefix = self.compat_data / "pfx"
+            if wineprefix.is_dir():
+                try:
+                    subprocess.run(
+                        [str(wineserver), "-k"],
+                        env={"WINEPREFIX": str(wineprefix)},
+                        capture_output=True,
+                        timeout=10,
+                    )
+                except Exception:
+                    pass
+
+        try:
+            self.process.terminate()
+            self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            console.print("[yellow]Force kill...[/yellow]")
+            self.process.kill()
+            self.process.wait()
+        except Exception:
+            pass
+
+        self.process = None
+        console.print("[bold green]Balatro peatatud.[/bold green]")
+
+
+# ---------------------------------------------------------------------------
+# Benchmark Runner
+# ---------------------------------------------------------------------------
+
 class BalatroBenchmark:
     """Automates BalatroBench fixed-seed benchmarking runs."""
 
@@ -53,14 +285,27 @@ class BalatroBenchmark:
         stake: str = "WHITE",
         api_key: Optional[str] = None,
         api_base: Optional[str] = None,
+        auto_launch: bool = False,
+        headless: bool = False,
+        fast: bool = True,
     ):
         self.endpoint = endpoint
         self.backend_type = backend
         self.model = model
         self.deck = deck
         self.stake = stake
+        self.auto_launch = auto_launch
+        self.launcher: Optional[BalatroLauncher] = None
 
-        # Instantiate agent with requested backend
+        if auto_launch:
+            port = int(endpoint.split(":")[-1])
+            self.launcher = BalatroLauncher(
+                port=port,
+                headless=headless,
+                fast=fast,
+                audio=False,
+            )
+
         backend_obj = create_backend(
             backend_type=backend,
             model=model,
@@ -70,36 +315,84 @@ class BalatroBenchmark:
         self.agent = BalatroAgent(backend=backend_obj)
         self.client = BalatroBotClient(endpoint=endpoint, agent=self.agent)
 
+    def ensure_game_running(self) -> bool:
+        """Tagab et Balatro jookseb ja BalatroBot vastab."""
+        if self.client.health():
+            console.print("[bold green]BalatroBot juba jookseb![/bold green]")
+            return True
+
+        if not self.launcher:
+            console.print(
+                "[bold red]BalatroBot ei vasta ja auto-launch on valjas.[/bold red]\n"
+                "[yellow]Kaevita Balatro kaesitsi voi kasuta --auto-launch lippu.[/yellow]"
+            )
+            return False
+
+        self.launcher.start()
+        if not self.launcher.wait_for_health(timeout=60.0):
+            return False
+
+        # Oota et menueu UI taeielikult laadiks (viewed_back, blind_select jne)
+        console.print("[yellow]Ootan menueu taeielikku laadimist...[/yellow]")
+        time.sleep(8.0)
+        return True
+
+    def ensure_at_menu(self) -> bool:
+        """Tagab et maeng on MENU olekus (start endpoint nouab seda)."""
+        state = self.client.get_gamestate()
+        if not state:
+            return False
+
+        current = state.get("state", "")
+        if current == "MENU":
+            return True
+
+        console.print(f"[yellow]Praegune olek: {current} -> Navigeerin menuusse...[/yellow]")
+        result = self.client.send_rpc("menu")
+        if result is None:
+            console.print("[red]Menu RPC ebaonnestus[/red]")
+            return False
+
+        for _ in range(20):
+            time.sleep(0.5)
+            state = self.client.get_gamestate()
+            if state and state.get("state") == "MENU":
+                return True
+
+        console.print("[red]Ei suutnud menuusse navigeerida[/red]")
+        return False
+
     def start_seed_run(self, seed: str) -> bool:
         """Starts a fresh game run with the specified seed."""
-        console.print(f"[bold cyan]🚀 Starting BalatroBench run:[/bold cyan] Seed=[yellow]{seed}[/yellow], Deck={self.deck}, Stake={self.stake}")
+        console.print(
+            f"[bold cyan]BalatroBench run:[/bold cyan] "
+            f"Seed=[yellow]{seed}[/yellow], Deck={self.deck}, Stake={self.stake}"
+        )
 
-        # If currently in game, ensure we return to menu or restart
-        try:
-            state_resp = self.client.get_state()
-            curr_state = (state_resp.get("state") or "") if state_resp else ""
-            if curr_state != "MENU":
-                self.client.menu()
-                time.sleep(0.5)
-        except Exception:
-            pass
+        if not self.ensure_at_menu():
+            console.print("[bold red]Ei saa menuusse[/bold red]")
+            return False
 
-        # Send start command with seed
         start_params = {
             "deck": self.deck,
             "stake": self.stake,
             "seed": seed,
         }
-        res = self.client.send_rpc("start", start_params)
-        if not res:
-            console.print(f"[bold red]❌ Failed to start run with seed {seed}[/bold red]")
-            return False
 
-        time.sleep(0.5)
-        return True
+        # Retry loogika: menueu UI ei pruugi kohe valmis olla
+        for attempt in range(5):
+            res = self.client.send_rpc("start", start_params)
+            if res:
+                time.sleep(0.5)
+                return True
+            console.print(f"[yellow]Start katse {attempt + 1}/5 ebaonnestus, ootan 3s...[/yellow]")
+            time.sleep(3.0)
 
-    def run_single_benchmark(self, seed: str, max_rounds: int = 40) -> Dict[str, Any]:
-        """Plays a full run until GAME_OVER or victory (won=True)."""
+        console.print(f"[bold red]Start RPC ebaonnestus koik 5 katset (seed {seed})[/bold red]")
+        return False
+
+    def run_single_benchmark(self, seed: str) -> Dict[str, Any]:
+        """Plays a full run until GAME_OVER or victory."""
         started = self.start_seed_run(seed)
         if not started:
             return {
@@ -107,7 +400,12 @@ class BalatroBenchmark:
                 "error": "Failed to initialize run",
                 "rounds_reached": 0,
                 "ante_reached": 0,
+                "final_score": 0,
                 "won": False,
+                "money": 0,
+                "duration_seconds": 0,
+                "backend": self.backend_type,
+                "model": self.model or "default",
             }
 
         runner = BalatroLayaRunner(endpoint=self.endpoint, agent=self.agent)
@@ -119,9 +417,8 @@ class BalatroBenchmark:
         is_won = False
         final_money = 0
 
-        # Run the game loop
         while True:
-            raw_g = runner.client.get_state()
+            raw_g = runner.client.get_gamestate()
             if not raw_g:
                 time.sleep(0.5)
                 continue
@@ -141,16 +438,15 @@ class BalatroBenchmark:
                 last_score = round_info.get("chips", 0)
                 break
 
-            # Handle current state
             try:
-                runner.step()
+                runner.run_step()
             except Exception as e:
-                console.print(f"[yellow]Warning during step: {e}[/yellow]")
+                console.print(f"[yellow]Hoiatus: {e}[/yellow]")
 
             time.sleep(0.1)
 
         elapsed = time.time() - start_time
-        result = {
+        return {
             "seed": seed,
             "backend": self.backend_type,
             "model": self.model or "default",
@@ -161,7 +457,6 @@ class BalatroBenchmark:
             "money": final_money,
             "duration_seconds": round(elapsed, 1),
         }
-        return result
 
     def run_suite(
         self,
@@ -173,31 +468,37 @@ class BalatroBenchmark:
         target_seeds = seeds or OFFICIAL_BENCHMARK_SEEDS
         results = []
 
+        if not self.ensure_game_running():
+            console.print("[bold red]Maeng ei kaevitunud, katkestamine.[/bold red]")
+            return results
+
         console.print(Panel.fit(
             f"[bold green]BalatroBench Automated Evaluation Suite[/bold green]\n"
             f"Backend: [cyan]{self.backend_type}[/cyan] | Model: [cyan]{self.model or 'default'}[/cyan]\n"
-            f"Seeds: {len(target_seeds)} ({chr(44).join(target_seeds)}) | Runs per seed: {runs_per_seed}",
+            f"Seeds: {len(target_seeds)} ({','.join(target_seeds)}) | Runs per seed: {runs_per_seed}",
             border_style="green"
         ))
 
-        for seed in target_seeds:
-            for run_idx in range(runs_per_seed):
-                console.print(f"\n[bold blue]━━━ Seed {seed} (Run {run_idx + 1}/{runs_per_seed}) ━━━[/bold blue]")
-                res = self.run_single_benchmark(seed)
-                res["run_index"] = run_idx + 1
-                results.append(res)
-                console.print(
-                    f"Result: Ante [bold]{res['ante_reached']}[/bold] | "
-                    f"Round [bold]{res['rounds_reached']}[/bold] | "
-                    f"Score: {res['final_score']} | "
-                    f"Won: {res['won']} | "
-                    f"Time: {res['duration_seconds']}s"
-                )
+        try:
+            for seed in target_seeds:
+                for run_idx in range(runs_per_seed):
+                    console.print(f"\n[bold blue]--- Seed {seed} (Run {run_idx + 1}/{runs_per_seed}) ---[/bold blue]")
+                    res = self.run_single_benchmark(seed)
+                    res["run_index"] = run_idx + 1
+                    results.append(res)
+                    console.print(
+                        f"Result: Ante [bold]{res['ante_reached']}[/bold] | "
+                        f"Round [bold]{res['rounds_reached']}[/bold] | "
+                        f"Score: {res['final_score']} | "
+                        f"Won: {res['won']} | "
+                        f"Time: {res['duration_seconds']}s"
+                    )
+        finally:
+            if self.launcher:
+                self.launcher.stop()
 
-        # Print summary table
         self.print_summary(results)
 
-        # Save to output file if requested
         if output_file:
             out_p = Path(output_file)
             out_p.parent.mkdir(parents=True, exist_ok=True)
@@ -206,9 +507,11 @@ class BalatroBenchmark:
                     "timestamp": datetime.now().isoformat(),
                     "backend": self.backend_type,
                     "model": self.model,
+                    "deck": self.deck,
+                    "stake": self.stake,
                     "results": results,
                 }, f, indent=2)
-            console.print(f"[bold green]Saved benchmark results to {output_file}[/bold green]")
+            console.print(f"[bold green]Tulemused salvestatud: {output_file}[/bold green]")
 
         return results
 
@@ -252,28 +555,64 @@ class BalatroBenchmark:
 
             console.print(Panel(
                 f"[bold white]Benchmark Summary Statistics:[/bold white]\n"
-                f"• Average Rounds Reached: [bold magenta]{avg_rounds} / 24[/bold magenta]\n"
-                f"• Average Ante Reached: [bold yellow]{avg_ante} / 8[/bold yellow]\n"
-                f"• Win Rate: [bold green]{win_rate}%[/bold green]\n"
-                f"• Total Runs: {n}",
+                f"Average Rounds Reached: [bold magenta]{avg_rounds} / 24[/bold magenta]\n"
+                f"Average Ante Reached: [bold yellow]{avg_ante} / 8[/bold yellow]\n"
+                f"Win Rate: [bold green]{win_rate}%[/bold green]\n"
+                f"Total Runs: {n}",
                 title="Leaderboard Score",
                 border_style="magenta"
             ))
 
 
 def main():
-    parser = argparse.ArgumentParser(description="BalatroBench Official Benchmark Runner")
-    parser.add_argument("--backend", default="laya", choices=["laya", "api_llm", "agentic"], help="Decision backend to test")
-    parser.add_argument("--model", default=None, help="Model identifier (e.g. gpt-4o, claude-3-5-sonnet, convaiinnovations/laya)")
-    parser.add_argument("--seeds", default=None, help="Comma-separated list of seeds (default: official AAAAAAA..EEEEEEE)")
-    parser.add_argument("--deck", default="RED", help="Deck name (default: RED)")
-    parser.add_argument("--stake", default="WHITE", help="Stake name (default: WHITE)")
-    parser.add_argument("--runs", type=int, default=1, help="Runs per seed")
-    parser.add_argument("--endpoint", default="http://127.0.0.1:12346", help="BalatroBot JSON-RPC URL")
-    parser.add_argument("--output", default="benchmark_results.json", help="Path to save output results JSON")
+    parser = argparse.ArgumentParser(
+        description="BalatroBench Official Benchmark Runner",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Launch Balatro automatically + run one seed (Laya backend)
+  PYTHONPATH=. .venv/bin/python sidecar/bench.py --auto-launch --seeds AAAAAAA
+
+  # All 5 official seeds, headless mode
+  PYTHONPATH=. .venv/bin/python sidecar/bench.py --auto-launch --headless
+
+  # API LLM backend (GPT-4o), game already running
+  export OPENAI_API_KEY="sk-..."
+  PYTHONPATH=. .venv/bin/python sidecar/bench.py --backend api_llm --model gpt-4o
+
+  # Save results to file
+  PYTHONPATH=. .venv/bin/python sidecar/bench.py --auto-launch --output results.json
+"""
+    )
+    parser.add_argument("--backend", default="laya", choices=["laya", "api_llm", "agentic"],
+                        help="Decision backend (default: laya)")
+    parser.add_argument("--model", default=None,
+                        help="Model identifier (e.g. gpt-4o, claude-3-5-sonnet)")
+    parser.add_argument("--seeds", default=None,
+                        help="Comma-separated seeds (default: AAAAAAA..EEEEEEE)")
+    parser.add_argument("--deck", default="RED",
+                        help="Deck name (default: RED)")
+    parser.add_argument("--stake", default="WHITE",
+                        help="Stake name (default: WHITE)")
+    parser.add_argument("--runs", type=int, default=1,
+                        help="Runs per seed (default: 1)")
+    parser.add_argument("--endpoint", default="http://127.0.0.1:12346",
+                        help="BalatroBot JSON-RPC URL")
+    parser.add_argument("--output", default="benchmark_results.json",
+                        help="Path to save output results JSON")
+
+    launch_group = parser.add_argument_group("Auto-Launch")
+    launch_group.add_argument("--auto-launch", action="store_true",
+                              help="Launch Balatro automatically via Proton")
+    launch_group.add_argument("--headless", action="store_true",
+                              help="Headless mode (minimal window, no rendering)")
+    launch_group.add_argument("--no-fast", action="store_true",
+                              help="Disable fast mode (default: fast is ON)")
+
     args = parser.parse_args()
 
     seed_list = [s.strip() for s in args.seeds.split(",")] if args.seeds else OFFICIAL_BENCHMARK_SEEDS
+    fast = not args.no_fast
 
     bench = BalatroBenchmark(
         endpoint=args.endpoint,
@@ -281,6 +620,9 @@ def main():
         model=args.model,
         deck=args.deck,
         stake=args.stake,
+        auto_launch=args.auto_launch,
+        headless=args.headless,
+        fast=fast,
     )
     bench.run_suite(seeds=seed_list, runs_per_seed=args.runs, output_file=args.output)
 

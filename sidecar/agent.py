@@ -422,6 +422,32 @@ class BalatroAgent:
 
         return (0, None, f"Selected '{pack_cards[0].get('label', 'card')}'")
 
+    @staticmethod
+    def consumable_requires_hand(c: Dict[str, Any]) -> bool:
+        """Determines if a consumable card targets cards in hand (requiring SELECTING_HAND state)."""
+        set_type = (c.get("set") or "").upper()
+        if set_type == "PLANET":
+            return False
+
+        name = (c.get("label") or c.get("key") or "").lower()
+        non_hand_names = {
+            "hermit", "the hermit", "fool", "the fool", "temperance",
+            "judgement", "the judgement", "wheel of fortune", "the wheel of fortune",
+            "emperor", "the emperor", "high priestess", "the high priestess"
+        }
+        if any(nh in name for nh in non_hand_names):
+            return False
+
+        val_obj = c.get("value", {}) if isinstance(c, dict) else {}
+        eff = (val_obj.get("effect") or "").lower() if isinstance(val_obj, dict) else ""
+        if eff:
+            if re.search(r"select(?:ed)?\s+(\d+\s+)?cards?|\bconvert\b|\bdestroy\b|\benhance\b", eff):
+                return True
+            if any(k in eff for k in ["money", "cash", "joker", "copy", "edition", "creates up to"]):
+                return False
+
+        return set_type == "TAROT"
+
     def decide_tarot_targets(
         self,
         tarot_name: str,
@@ -441,10 +467,15 @@ class BalatroAgent:
         # Check if this card targets hand cards based on effect text or card description
         # In Balatro, targeting cards state "selected card" or "selected cards"
         if eff_lower:
-            if "selected card" not in eff_lower:
+            target_match = re.search(r"select(?:ed)?\s+(?:up\s+to\s+)?(\d+)\s+cards?", eff_lower)
+            if target_match:
+                max_targets = int(target_match.group(1))
+            elif "selected card" in eff_lower or "select 1 card" in eff_lower:
+                max_targets = 1
+            elif any(k in eff_lower for k in ["convert", "destroy", "enhance", "enhances"]):
+                max_targets = 2 if "2 cards" in eff_lower else 1
+            else:
                 return None
-            target_match = re.search(r"(\d+)\s+selected\s+card", eff_lower)
-            max_targets = int(target_match.group(1)) if target_match else 1
         else:
             # If no effect text was provided, detect self-targeting tarots (money/joker tarots)
             # which never target playing cards in hand
@@ -483,10 +514,15 @@ class BalatroAgent:
             )
             if choice.startswith("card_"):
                 chosen_idx = int(choice.split("_")[1])
+                if max_targets >= 2 and len(hand) >= 2:
+                    c1 = 1 if chosen_idx != 1 else 0
+                    return [chosen_idx, c1]
                 return [chosen_idx]
         except Exception:
             pass
 
+        if max_targets >= 2 and len(hand) >= 2:
+            return [0, 1]
         return [0]
 
     def decide_consumable_action(
@@ -499,8 +535,13 @@ class BalatroAgent:
         if not consumables:
             return None
 
+        current_state = (raw_g.get("state") or "") if raw_g else ""
+        is_selecting_hand = (current_state == "SELECTING_HAND")
+
         candidates = {}
         for idx, c in enumerate(consumables):
+            if not is_selecting_hand and self.consumable_requires_hand(c):
+                continue
             name = c.get("label") or c.get("key", f"Consumable #{idx}")
             set_type = c.get("set", "CONSUMABLE")
             val_obj = c.get("value", {}) if isinstance(c, dict) else {}
