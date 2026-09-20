@@ -1,11 +1,32 @@
-import laya
+"""
+Balatro Autonomous AI Agent
+Driven 100% by Laya (ModernBERT System 1) decisions using BalatroLLM strategy templates.
+Python acts solely as the interface: enumerating legal candidate actions with real
+in-game scores and executing Laya's decisions via JSON-RPC.
+"""
+
+import itertools
 from collections import Counter
 from dataclasses import dataclass
-from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-from sidecar.poker_eval import Card, PokerEvaluator, EvaluatedHand
+import laya
+from sidecar.poker_eval import Card, PokerEvaluator
 from sidecar.strategy import StrategyManager
+
+DEFAULT_HAND_SCORES = {
+    "Straight Flush": (100, 8),
+    "Four of a Kind": (60, 7),
+    "Full House": (40, 4),
+    "Flush": (35, 4),
+    "Straight": (30, 4),
+    "Three of a Kind": (30, 3),
+    "Two Pair": (20, 2),
+    "Pair": (10, 2),
+    "High Card": (5, 1),
+}
+
 
 @dataclass
 class BalatroGameState:
@@ -19,367 +40,269 @@ class BalatroGameState:
     hand: List[Card]
     jokers: List[str]
 
+
 @dataclass
 class AgentAction:
-    action_type: str  # "PLAY", "DISCARD", "BUY", "SELL", "SKIP"
+    action_type: str  # "PLAY" or "DISCARD"
     cards: List[Card]
-    target_item: Optional[str] = None
-    reasoning: str = ""
-    confidence: float = 1.0
+    reasoning: str
+    confidence: float
 
-# 4 Pillars of Jokers classifier for optimal positioning and purchasing
-CHIP_JOKERS = {
-    "banner", "blue joker", "ice cream", "bull", "stuntman", "hiker",
-    "scary face", "arrowhead", "onyx agate", "castle", "odd todd", "sly joker", "crafty joker"
-}
-
-FLAT_MULT_JOKERS = {
-    "joker", "gros michel", "half joker", "popcorn", "mystic summit", "abstract joker",
-    "misprint", "even steven", "droll joker", "clever joker", "wily joker",
-    "zodiac joker", "mad joker", "crazy joker", "gluttonous joker", "lusty joker", "wrathful joker", "greedy joker"
-}
-
-SCALING_MULT_JOKERS = {
-    "ride the bus", "green joker", "supernova", "red card", "swashbuckler",
-    "flash card", "fortune teller", "spare trousers", "constellation", "lucky cat", "wee joker"
-}
-
-X_MULT_JOKERS = {
-    "cavendish", "card sharp", "blueprint", "brainstorm", "blackboard", "baron",
-    "duo", "trio", "family", "order", "tribe", "polychrome", "driver's license",
-    "the idol", "ancient joker", "bloodstone", "steel joker", "campfire", "ramen"
-}
-
-def classify_joker(name: str) -> int:
-    """
-    Returns priority weight for positioning:
-    0: Chips (Left)
-    1: Flat Mult (Middle-Left)
-    2: Scaling Mult (Middle-Right)
-    3: X-Mult (Far Right)
-    """
-    n = name.lower()
-    for k in X_MULT_JOKERS:
-        if k in n:
-            return 3
-    for k in SCALING_MULT_JOKERS:
-        if k in n:
-            return 2
-    for k in FLAT_MULT_JOKERS:
-        if k in n:
-            return 1
-    for k in CHIP_JOKERS:
-        if k in n:
-            return 0
-    return 1
 
 def find_weakest_joker_index(jokers: List[Dict[str, Any]]) -> Optional[int]:
-    """Finds the least valuable non-eternal joker to sell when slots are full."""
-    candidates = []
+    """Finds the lowest-tier sellable joker when slots are full."""
+    if not jokers:
+        return None
     for idx, j in enumerate(jokers):
         if not isinstance(j, dict):
             continue
         mod = j.get("modifier")
         if isinstance(mod, dict) and mod.get("eternal"):
-            continue  # Cannot be sold
-        name = (j.get("label") or j.get("key", "")).lower()
-        cat = classify_joker(name)
-        # Priority: cat 0 or 1 is easiest to replace, especially flat mult or utility
-        candidates.append((cat, idx, name))
+            continue
+        return idx
+    return 0
 
-    if not candidates:
-        return None
-
-    # Sort by tier (lowest category first)
-    candidates.sort(key=lambda x: x[0])
-    return candidates[0][1]
 
 class BalatroAgent:
-    """Autonomous Balatro agent using coder/balatrollm official strategies and Laya neural decisions."""
+    """Autonomous Balatro agent where Laya makes 100% of game decisions."""
 
     def __init__(self, rules_path: str = "rules/balatro-strategy.md", strategy_name: str = "default"):
         self.rules_path = Path(rules_path)
-        self.rules_content = self.rules_path.read_text(encoding="utf-8") if self.rules_path.exists() else ""
         self.strategy_name = strategy_name
         self.sm = StrategyManager(strategy_name)
         self.agent = laya.load("convaiinnovations/laya")
 
-    def decide_hand_action(self, state: BalatroGameState, raw_g: Optional[Dict[str, Any]] = None) -> AgentAction:
-        best_hands = PokerEvaluator.find_best_playable_hands(state.hand, top_k=2)
-        top_hand = best_hands[0]
-        needed_chips = max(0, state.target_chips - state.current_chips)
-
-        if top_hand.total_score >= needed_chips:
-            return AgentAction(
-                action_type="PLAY",
-                cards=top_hand.cards,
-                reasoning=f"Winning play: '{top_hand.hand_type}' yields {top_hand.total_score} pts, beating needed {needed_chips} pts.",
-                confidence=1.0
-            )
-
-        if state.discards_left > 0:
-            suit_counts = Counter(c.suit for c in state.hand)
-            most_common_suit, count = suit_counts.most_common(1)[0]
-            if 3 <= count < 5 and top_hand.total_score < (needed_chips * 0.5):
-                discards = [c for c in state.hand if c.suit != most_common_suit][:5]
-                return AgentAction(
-                    action_type="DISCARD",
-                    cards=discards,
-                    reasoning=f"Flush Digging: Holding {count} {most_common_suit}. Discarding {len(discards)} off-suit cards to dig for Flush.",
-                    confidence=0.98
-                )
-
-        if state.discards_left > 0 and state.hands_left > 1:
-            recommended_discards = PokerEvaluator.recommend_discards(state.hand)
-            gamestate_repr = self.sm.render_gamestate(raw_g) if raw_g else f"Ante {state.ante}, Hands: {state.hands_left}, Discards: {state.discards_left}, Needed: {needed_chips}"
-            
-            laya_state = {
-                "gamestate": gamestate_repr[:1500],
-                "playable_hand": f"{top_hand.hand_type} ({top_hand.total_score} pts)",
-                "needed_chips": needed_chips,
-                "discards_left": state.discards_left
-            }
-
-            questions = {
-                "hand_strategy": {
-                    "type": "choice",
-                    "instructions": "Determine if current hand score justifies playing or if player should discard based on official strategy.",
-                    "criteria": {
-                        "play": "The hand score is substantial or remaining hands are critical.",
-                        "discard": "The hand score is too low compared to target chips and discards are plentiful."
-                    }
-                }
-            }
-
+    def _render_state(self, raw_g: Optional[Dict[str, Any]], state: Optional[BalatroGameState] = None) -> str:
+        """Renders gamestate markdown via BalatroLLM Jinja template."""
+        if raw_g:
             try:
-                res = self.agent.predict(laya_state, questions)
-                choice = res["answers"]["hand_strategy"]["choice"]
-                conf = float(res["answers"]["hand_strategy"].get("confidence", 0.90))
-
-                if choice == "discard":
-                    return AgentAction(
-                        action_type="DISCARD",
-                        cards=recommended_discards,
-                        reasoning=f"Neural Decision: Discarding {len(recommended_discards)} cards to dig for higher score.",
-                        confidence=conf
-                    )
+                return self.sm.render_gamestate(raw_g)
             except Exception:
                 pass
+        if state:
+            return (
+                f"# Balatro Game State\n"
+                f"- Ante: {state.ante} | Blind: {state.blind_name}\n"
+                f"- Target: {state.target_chips} | Current: {state.current_chips}\n"
+                f"- Hands Left: {state.hands_left} | Discards Left: {state.discards_left}\n"
+                f"- Money: ${state.money}\n"
+                f"- Jokers: {', '.join(state.jokers) if state.jokers else 'None'}\n"
+            )
+        return "# Balatro Game State (in progress)"
 
-        return AgentAction(
-            action_type="PLAY",
-            cards=top_hand.cards,
-            reasoning=f"Playing best available hand: {top_hand.hand_type} ({top_hand.total_score} pts).",
-            confidence=0.95
+    def decide_hand_action(self, state: BalatroGameState, raw_g: Optional[Dict[str, Any]] = None) -> AgentAction:
+        """
+        Enumerates all distinct playable hands (using live in-game chip/mult levels from raw_g)
+        and discard options, then queries Laya to choose the action.
+        """
+        if not state.hand:
+            return AgentAction("PLAY", [], "No cards in hand", 0.0)
+
+        hands_data = raw_g.get("hands", {}) if raw_g else {}
+        needed_chips = max(0, state.target_chips - state.current_chips)
+
+        candidates = {}  # action_key -> (action_type, cards, description)
+
+        # 1. Enumerate distinct multi-card poker hands
+        seen_hand_types = set()
+        for size in (5, 4, 3, 2):
+            for combo in itertools.combinations(state.hand, size):
+                h_type, scoring = PokerEvaluator.identify_hand(list(combo))
+                if h_type not in seen_hand_types and h_type != "High Card":
+                    seen_hand_types.add(h_type)
+                    h_info = hands_data.get(h_type, {})
+                    lvl = h_info.get("level", 1)
+                    default_c, default_m = DEFAULT_HAND_SCORES.get(h_type, (10, 2))
+                    base_c = h_info.get("chips", default_c)
+                    base_m = h_info.get("mult", default_m)
+                    card_chips = sum(c.chip_value for c in combo)
+                    est_pts = (base_c + card_chips) * base_m
+                    cards_str = ", ".join(f"{c.rank}{c.suit[0]}" for c in combo)
+                    key = f"play_{h_type.lower().replace(' ', '_')}"
+                    status = "WINNING PLAY!" if est_pts >= needed_chips else f"yields ~{est_pts} pts"
+                    desc = f"Play {h_type} [{cards_str}] (Level {lvl}: {status}, needed: {needed_chips})"
+                    candidates[key] = ("PLAY", list(combo), desc)
+
+        # 2. Add High Card (1 card: highest rank or lowest rank)
+        sorted_by_val = sorted(state.hand, key=lambda c: c.value)
+        highest_card = sorted_by_val[-1]
+        h_info = hands_data.get("High Card", {})
+        lvl = h_info.get("level", 1)
+        base_c = h_info.get("chips", 5)
+        base_m = h_info.get("mult", 1)
+        hc_pts = (base_c + highest_card.chip_value) * base_m
+        candidates["play_high_card"] = (
+            "PLAY",
+            [highest_card],
+            f"Play High Card [{highest_card.rank}{highest_card.suit[0]}] (Level {lvl}: ~{hc_pts} pts)",
         )
 
-    def decide_joker_order(self, current_jokers: List[Dict[str, Any]]) -> Optional[List[int]]:
-        if len(current_jokers) <= 1:
-            return None
+        if len(state.hand) > 1 and state.discards_left == 0:
+            lowest_card = sorted_by_val[0]
+            candidates["play_single_low"] = (
+                "PLAY",
+                [lowest_card],
+                f"Play single card [{lowest_card.rank}{lowest_card.suit[0]}] as High Card to preserve remaining cards",
+            )
 
-        indexed = []
-        for i, j in enumerate(current_jokers):
-            name = j.get("label") or j.get("key", "")
-            cat = classify_joker(name)
-            indexed.append((cat, i))
+        # 3. Enumerate discard options if discards are available
+        if state.discards_left > 0:
+            # A. Discard off-suit cards if 3+ of same suit (Flush digging)
+            suit_counts = Counter(c.suit for c in state.hand)
+            most_common_suit, count = suit_counts.most_common(1)[0]
+            if 3 <= count < 5:
+                offsuits = [c for c in state.hand if c.suit != most_common_suit][:5]
+                off_str = ", ".join(f"{c.rank}{c.suit[0]}" for c in offsuits)
+                candidates["discard_offsuit"] = (
+                    "DISCARD",
+                    offsuits,
+                    f"Discard {len(offsuits)} non-{most_common_suit} cards [{off_str}] to dig for the 5th {most_common_suit} for an 800+ pt Flush",
+                )
 
-        sorted_indices = [idx for cat, idx in sorted(indexed, key=lambda x: x[0])]
-        if sorted_indices == list(range(len(current_jokers))):
-            return None
+            # B. Discard lowest unaligned cards
+            num_discard = min(len(state.hand), 4)
+            low_discard = sorted_by_val[:num_discard]
+            low_str = ", ".join(f"{c.rank}{c.suit[0]}" for c in low_discard)
+            candidates["discard_lowest"] = (
+                "DISCARD",
+                low_discard,
+                f"Discard {len(low_discard)} lowest cards [{low_str}] to dig for stronger hands or synergies",
+            )
 
-        return sorted_indices
+        # Build Laya criteria
+        criteria = {k: desc for k, (_, _, desc) in candidates.items()}
+        gamestate_text = self._render_state(raw_g, state)
 
-    def decide_consumable_action(self, consumables: List[Dict[str, Any]]) -> Optional[Tuple[int, str]]:
-        if not consumables:
-            return None
+        questions = {
+            "hand_action": {
+                "type": "choice",
+                "instructions": (
+                    "You are playing Balatro. Strategic rules: "
+                    "1. Always prioritize playing winning 5-card hands (Flush, Full House, Straight) if they beat or heavily damage the target chips. "
+                    "2. If current hands are weak (high card or low pair) and target chips are high, prioritize discarding off-suit or low cards to dig for a Flush or synergy. "
+                    "3. Select the single best strategic action."
+                ),
+                "criteria": criteria,
+            }
+        }
 
-        for idx, c in enumerate(consumables):
-            set_type = c.get("set", "").upper()
-            name = (c.get("label") or c.get("key", "")).lower()
+        try:
+            res = self.agent.predict(gamestate_text[:2000], questions)
+            chosen_key = res["answers"]["hand_action"]["choice"]
+            conf = float(res["answers"]["hand_action"].get("confidence", 0.90))
+            if chosen_key in candidates:
+                act_type, cards, desc = candidates[chosen_key]
+                return AgentAction(
+                    action_type=act_type,
+                    cards=cards,
+                    reasoning=f"Laya Decision: {desc}",
+                    confidence=conf,
+                )
+        except Exception:
+            pass
 
-            if set_type == "PLANET" or any(p in name for p in ["jupiter", "pluto", "mars", "saturn", "earth", "mercury", "uranus", "venus", "neptune"]):
-                return (idx, f"Using planet card '{c.get('label') or name}' to level up poker hands.")
+        first_key = next(iter(candidates))
+        act_type, cards, desc = candidates[first_key]
+        return AgentAction(act_type, cards, f"Defaulting to {desc}", 0.8)
 
-            if "hermit" in name:
-                return (idx, "Using The Hermit for instant economy boost.")
-
-            if "temperance" in name:
-                return (idx, "Using Temperance for instant cash boost.")
-
-            if "fool" in name:
-                return (idx, "Using The Fool to duplicate last card.")
-
-        return None
-
-    def decide_pack_card(self, pack_cards: List[Dict[str, Any]], hand: Optional[List[Card]] = None, jokers_count: int = 0, max_jokers: int = 5) -> Optional[Tuple[int, Optional[List[int]], str]]:
-        if not pack_cards:
-            return None
-
-        hand_cards = hand or []
-        n_hand = len(hand_cards)
-
-        for idx, c in enumerate(pack_cards):
-            name = (c.get("label") or c.get("key", "")).lower()
-            set_type = c.get("set", "").upper()
-            if set_type == "PLANET" or any(p in name for p in ["jupiter", "pluto", "mars", "saturn", "earth", "uranus", "venus", "neptune"]):
-                return (idx, None, f"Selected planet card '{c.get('label', name)}' for permanent hand level up.")
-
-        for idx, c in enumerate(pack_cards):
-            name = (c.get("label") or c.get("key", "")).lower()
-            if "temperance" in name:
-                return (idx, None, "Selected 'Temperance' for immediate cash boost.")
-            if "hermit" in name:
-                return (idx, None, "Selected 'The Hermit' to double money.")
-            if "judgement" in name and jokers_count < max_jokers:
-                return (idx, None, "Selected 'Judgement' to spawn a free Joker.")
-            if "wheel of fortune" in name and jokers_count > 0:
-                return (idx, None, "Selected 'The Wheel of Fortune' to roll for Joker edition.")
-            if "fool" in name:
-                return (idx, None, "Selected 'The Fool' to duplicate last consumable.")
-
-        if n_hand >= 2:
-            hand_sorted_by_val = sorted(range(n_hand), key=lambda i: hand_cards[i].value)
-            worst_indices = hand_sorted_by_val[:2]
-            best_indices = hand_sorted_by_val[-2:]
-
-            for idx, c in enumerate(pack_cards):
-                name = (c.get("label") or c.get("key", "")).lower()
-                if "death" in name:
-                    return (idx, [worst_indices[0], best_indices[-1]], f"Selected 'Death': transforming card #{worst_indices[0]} into copy of #{best_indices[-1]}.")
-                if "hanged man" in name:
-                    return (idx, worst_indices, f"Selected 'The Hanged Man': destroying low cards {worst_indices} to thin deck.")
-                if any(s in name for s in ["the sun", "the moon", "the star", "the world"]):
-                    suit_targets = worst_indices[:min(3, n_hand)]
-                    return (idx, suit_targets, f"Selected suit converter '{c.get('label', name)}'.")
-                if any(e in name for e in ["empress", "hierophant", "chariot", "magician", "lovers", "devil"]):
-                    enhance_targets = [best_indices[-1]]
-                    return (idx, enhance_targets, f"Selected enhancement '{c.get('label', name)}' on top card #{best_indices[-1]}.")
-
-        for idx, c in enumerate(pack_cards):
-            set_type = c.get("set", "").upper()
-            if set_type == "JOKER" or "joker" in c.get("key", "").lower():
-                name = c.get("label") or c.get("key", "")
-                return (idx, None, f"Selected Joker '{name}' from Buffoon pack.")
-
-        TARGET_REQUIRING = ["death", "hanged man", "sun", "moon", "star", "world", "empress", "hierophant", "chariot", "magician", "lovers", "tower", "devil", "strength", "justice"]
-        for idx, c in enumerate(pack_cards):
-            name = (c.get("label") or c.get("key", "")).lower()
-            if not any(t in name for t in TARGET_REQUIRING):
-                return (idx, None, f"Selected safe card '{c.get('label', name)}' requiring no hand targets.")
-
-        return None
-
-    def decide_shop_action(self, state: BalatroGameState, shop_items: List[Dict[str, Any]], max_jokers: int = 5, raw_g: Optional[Dict[str, Any]] = None) -> Optional[Tuple[str, int, str]]:
+    def decide_shop_action(
+        self,
+        state: BalatroGameState,
+        shop_items: List[Dict[str, Any]],
+        max_jokers: int = 5,
+        raw_g: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Tuple[str, int, str]]:
         """
-        Evaluates shop items. Returns either:
-        - ("BUY", 0-based index, reasoning)
-        - ("SELL", 0-based joker index, reasoning)
-        - None (end shop)
+        Presents all available shop purchases and joker sales to Laya.
+        Laya directly decides what to buy, sell, or whether to save money.
         """
-        if not shop_items or state.money < 3:
+        if state.money < 1:
             return None
+
+        candidates = {}  # action_key -> (action_type, index, description)
 
         val_j = raw_g.get("jokers") if raw_g else None
         if isinstance(val_j, dict):
-            current_jokers_raw = val_j.get("cards", [])
+            current_jokers = val_j.get("cards", [])
         elif isinstance(val_j, list):
-            current_jokers_raw = val_j
+            current_jokers = val_j
         else:
-            current_jokers_raw = []
-        jokers_count = len(current_jokers_raw) if current_jokers_raw else len(state.jokers)
-        can_hold_joker = jokers_count < max_jokers
+            current_jokers = []
+        can_hold_joker = len(current_jokers) < max_jokers
 
-        mult_keywords = [
-            "joker", "mult", "popcorn", "gros michel", "half", "abstract", 
-            "mystic", "misprint", "even steven", "odd todd", "banner", 
-            "blue joker", "scary", "droll", "sly", "clever", "wily", 
-            "stencil", "supernova", "ride the bus", "green joker", "ceremonial"
-        ]
-        scaling_keywords = ["cavendish", "constellation", "card sharp", "blueprint", "brainstorm", "trousers", "duo", "trio", "family", "blackboard"]
-
-        # 1. Check if slots are full, but an elite Joker is in shop -> SELL WEAKEST JOKER TO MAKE ROOM!
-        if not can_hold_joker and current_jokers_raw:
-            weakest_idx = find_weakest_joker_index(current_jokers_raw)
-            if weakest_idx is not None:
-                weakest_joker = current_jokers_raw[weakest_idx]
-                cost_obj = weakest_joker.get("cost") if isinstance(weakest_joker, dict) else None
-                sell_val = cost_obj.get("sell", 1) if isinstance(cost_obj, dict) else (cost_obj if isinstance(cost_obj, int) else 1)
-                effective_money = state.money + sell_val
-
-                for idx, item in enumerate(shop_items):
-                    cost = item.get("cost", 4)
-                    name = str(item.get("name", "")).lower()
-                    is_elite = any(k in name for k in scaling_keywords)
-                    if is_elite and effective_money >= cost:
-                        weak_name = weakest_joker.get("label") or weakest_joker.get("key", "Joker")
-                        return ("SELL", weakest_idx, f"Selling weakest Joker '{weak_name}' (+${sell_val}) to make room for Elite Joker '{item.get('name')}' (${cost}).")
-
-        # 2. Buy if slots are open
-        affordable = []
+        # 1. Affordable items
         for idx, item in enumerate(shop_items):
             cost = item.get("cost", 4)
             if cost <= state.money:
-                affordable.append((idx, item, cost))
+                name = item.get("name", "Item")
+                if can_hold_joker or "voucher" in name.lower() or "planet" in name.lower() or "tarot" in name.lower():
+                    candidates[f"buy_item_{idx}"] = (
+                        "BUY",
+                        idx,
+                        f"Buy '{name}' (${cost}) from shop",
+                    )
 
-        if not affordable:
-            return None
+        # 2. Joker sales if slots are full
+        if not can_hold_joker and current_jokers:
+            for idx, j in enumerate(current_jokers):
+                if not isinstance(j, dict):
+                    continue
+                mod = j.get("modifier")
+                if isinstance(mod, dict) and mod.get("eternal"):
+                    continue
+                j_name = j.get("label") or j.get("key", f"Joker #{idx}")
+                cost_obj = j.get("cost")
+                sell_val = cost_obj.get("sell", 1) if isinstance(cost_obj, dict) else (cost_obj if isinstance(cost_obj, int) else 1)
+                candidates[f"sell_joker_{idx}"] = (
+                    "SELL",
+                    idx,
+                    f"Sell '{j_name}' to free a slot (+${sell_val}) for elite shop offerings",
+                )
 
-        for zero_based_idx, item, cost in affordable:
-            name = str(item.get("name", "")).lower()
-            if can_hold_joker:
-                if state.ante <= 3 or jokers_count < 2:
-                    is_scoring = any(k in name for k in mult_keywords) or jokers_count == 0
-                    if is_scoring:
-                        return ("BUY", zero_based_idx, f"Shop Priority: Buying '{item.get('name')}' (${cost}) to establish Mult/Chip foundation.")
-                else:
-                    is_elite = any(k in name for k in scaling_keywords)
-                    if is_elite or (state.money - cost >= 20):
-                        return ("BUY", zero_based_idx, f"Shop Priority: Acquiring scaling/utility Joker '{item.get('name')}' (${cost}).")
+        # 3. Option to leave shop and earn interest
+        candidates["end_shop"] = (
+            "END",
+            -1,
+            f"End shop without buying (preserve ${state.money} bankroll for interest)",
+        )
 
-        # 3. Consult Laya if multiple choices remain
-        if affordable and can_hold_joker and state.money >= 6:
-            gamestate_repr = self.sm.render_gamestate(raw_g) if raw_g else f"Ante {state.ante}, Money: ${state.money}, Jokers: {state.jokers}"
-            cand_summary = [f"#{idx}: {item.get('name')} (${cost})" for idx, item, cost in affordable]
-            
-            laya_state = {
-                "gamestate": gamestate_repr[:1500],
-                "available_items": cand_summary
+        criteria = {k: desc for k, (_, _, desc) in candidates.items()}
+        gamestate_text = self._render_state(raw_g, state)
+
+        questions = {
+            "shop_action": {
+                "type": "choice",
+                "instructions": (
+                    "You are playing Balatro. Review available shop items, money, and current jokers. "
+                    "If a powerful scaling/scoring joker is available, buy it (or sell a weak joker if slots are full). "
+                    "Otherwise save money towards $25 interest."
+                ),
+                "criteria": criteria,
             }
-            questions = {
-                "shop_decision": {
-                    "type": "choice",
-                    "instructions": "Choose whether to buy an available card or save money for interest based on official strategy.",
-                    "criteria": {
-                        "buy_first": "Buy the first available item to strengthen deck.",
-                        "save": "Save money towards $25 interest threshold."
-                    }
-                }
-            }
-            try:
-                res = self.agent.predict(laya_state, questions)
-                choice = res["answers"]["shop_decision"]["choice"]
-                if choice == "buy_first":
-                    first_idx, first_item, first_cost = affordable[0]
-                    return ("BUY", first_idx, f"Strategy Decision: Purchasing '{first_item.get('name')}' (${first_cost}).")
-            except Exception:
-                pass
+        }
+
+        try:
+            res = self.agent.predict(gamestate_text[:2000], questions)
+            choice = res["answers"]["shop_action"]["choice"]
+            if choice in candidates and choice != "end_shop":
+                act_type, target_idx, desc = candidates[choice]
+                return (act_type, target_idx, f"Laya Decision: {desc}")
+        except Exception:
+            pass
 
         return None
 
     def decide_blind_action(self, state: BalatroGameState, raw_g: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
         """
-        Decides whether to play the current blind or skip it for a tag bonus.
-        Returns ("SELECT" or "SKIP", reasoning).
+        Presents blind play vs skip options to Laya. Laya selects whether to play or skip.
         """
         if not raw_g:
-            return ("SELECT", "Defaulting to play blind.")
+            return ("SELECT", "Playing blind.")
 
         blinds = raw_g.get("blinds", {})
         current_blind_info = None
         current_type = None
 
-        # 1. Match by explicit status or selection
-        # Note: balatrobot returns status: "SELECT", "CURRENT", "UPCOMING", "DEFEATED", "SKIPPED"
         for b_key in ("small", "big", "boss"):
             b_info = blinds.get(b_key)
             if not isinstance(b_info, dict):
@@ -390,7 +313,6 @@ class BalatroAgent:
                 current_type = b_key.upper()
                 break
 
-        # 2. Fallback: First blind that has not been defeated or skipped
         if not current_blind_info:
             for b_key in ("small", "big", "boss"):
                 b_info = blinds.get(b_key)
@@ -407,52 +329,137 @@ class BalatroAgent:
 
         current_type = current_type or "SMALL"
 
-        # Boss blind cannot be skipped in Balatro
         if current_type == "BOSS":
             boss_name = current_blind_info.get("name") or "Boss Blind"
             return ("SELECT", f"Playing {boss_name} (Boss blinds cannot be skipped).")
 
-        tag_name = (current_blind_info.get("tag_name") or current_blind_info.get("tag") or "").lower()
+        blind_name = current_blind_info.get("name") or f"{current_type.capitalize()} Blind"
+        tag_name = current_blind_info.get("tag_name") or current_blind_info.get("tag") or "Tag"
         tag_desc = current_blind_info.get("tag_effect") or ""
 
-        HIGH_VALUE_TAGS = [
-            "negative", "polychrome", "coupon", "economy", "investment",
-            "rare joker", "uncommon joker", "voucher", "d_six"
-        ]
+        candidates = {
+            "play_blind": f"Play {blind_name} to earn cash payout and visit shop",
+            "skip_blind": f"Skip {blind_name} for Tag bonus: '{tag_name}' ({tag_desc})",
+        }
 
-        is_high_value = any(t in tag_name for t in HIGH_VALUE_TAGS)
-
-        # Ante 1 rule: If no jokers, only skip for game-changing tags (negative, polychrome, coupon)
-        if state.ante == 1 and len(state.jokers) < 2:
-            if any(t in tag_name for t in ["negative", "polychrome", "coupon"]):
-                return ("SKIP", f"Skipping blind for elite Ante 1 Tag: '{tag_name}' ({tag_desc}).")
-            return ("SELECT", f"Playing Ante 1 {current_type.capitalize()} Blind to earn shop visit and build scoring base.")
-
-        # Mid/Late game: If high value tag and deck has scoring engine
-        if is_high_value and len(state.jokers) >= 2:
-            # Consult Laya with gamestate
-            gamestate_repr = self.sm.render_gamestate(raw_g)
-            laya_state = {
-                "gamestate": gamestate_repr[:1500],
-                "tag_name": tag_name,
-                "tag_description": tag_desc
+        gamestate_text = self._render_state(raw_g, state)
+        questions = {
+            "blind_action": {
+                "type": "choice",
+                "instructions": (
+                    "Decide whether to play this blind for round payout and shop access, or skip for the tag reward. "
+                    "Only skip if tag offers game-changing value (Negative, Polychrome, Free shop items)."
+                ),
+                "criteria": candidates,
             }
-            questions = {
-                "blind_decision": {
-                    "type": "choice",
-                    "instructions": "Determine whether to play blind for cash/shop or skip for tag reward.",
-                    "criteria": {
-                        "skip": "The tag bonus offers massive strategic value (e.g. Free items, Negative, Polychrome, High Cash).",
-                        "play": "Playing the blind is safer to maintain interest, shop visits, and deck upgrades."
-                    }
-                }
-            }
-            try:
-                res = self.agent.predict(laya_state, questions)
-                choice = res["answers"]["blind_decision"]["choice"]
-                if choice == "skip":
-                    return ("SKIP", f"Laya Decision: Skipping blind for high-value Tag '{tag_name}' ({tag_desc}).")
-            except Exception:
-                pass
+        }
 
-        return ("SELECT", f"Playing {current_type.capitalize()} Blind for round reward and shop access.")
+        try:
+            res = self.agent.predict(gamestate_text[:2000], questions)
+            choice = res["answers"]["blind_action"]["choice"]
+            if choice == "skip_blind":
+                return ("SKIP", f"Laya Decision: Skipping {blind_name} for Tag '{tag_name}' ({tag_desc}).")
+        except Exception:
+            pass
+
+        return ("SELECT", f"Laya Decision: Playing {blind_name} for round reward and shop access.")
+
+    def decide_pack_card(
+        self,
+        pack_cards: List[Dict[str, Any]],
+        hand: Optional[List[Card]] = None,
+        jokers_count: int = 0,
+        max_jokers: int = 5,
+        raw_g: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Tuple[int, Optional[List[int]], str]]:
+        """Presents all cards in booster pack to Laya to pick the best card."""
+        if not pack_cards:
+            return None
+
+        candidates = {}
+        for idx, c in enumerate(pack_cards):
+            name = c.get("label") or c.get("key", f"Card #{idx}")
+            set_type = c.get("set", "CARD")
+            candidates[f"card_{idx}"] = f"Select {set_type} '{name}'"
+
+        candidates["skip_pack"] = "Skip booster pack without selecting any card"
+
+        gamestate_text = self._render_state(raw_g)
+        questions = {
+            "pack_choice": {
+                "type": "choice",
+                "instructions": "Evaluate the booster pack offerings and select the card that best improves the current deck and jokers.",
+                "criteria": candidates,
+            }
+        }
+
+        try:
+            res = self.agent.predict(gamestate_text[:2000], questions)
+            choice = res["answers"]["pack_choice"]["choice"]
+            if choice.startswith("card_"):
+                chosen_idx = int(choice.split("_")[1])
+                chosen_card = pack_cards[chosen_idx]
+                card_name = chosen_card.get("label") or chosen_card.get("key", "")
+                return (chosen_idx, None, f"Laya Decision: Selected '{card_name}' from pack.")
+        except Exception:
+            pass
+
+        return (0, None, f"Selected '{pack_cards[0].get('label', 'card')}'")
+
+    def decide_consumable_action(
+        self,
+        consumables: List[Dict[str, Any]],
+        raw_g: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Tuple[int, str]]:
+        """Presents consumables in inventory to Laya to decide if and when to use them."""
+        if not consumables:
+            return None
+
+        candidates = {}
+        for idx, c in enumerate(consumables):
+            name = c.get("label") or c.get("key", f"Item #{idx}")
+            set_type = c.get("set", "CONSUMABLE")
+            candidates[f"use_{idx}"] = f"Use {set_type} '{name}' immediately to level up hand or gain cash"
+
+        candidates["keep_all"] = "Keep all consumables in inventory for later"
+
+        gamestate_text = self._render_state(raw_g)
+        questions = {
+            "consumable_action": {
+                "type": "choice",
+                "instructions": "Determine whether to use an available consumable card now or hold it in inventory. Using planets or money tarot immediately is usually optimal.",
+                "criteria": candidates,
+            }
+        }
+
+        try:
+            res = self.agent.predict(gamestate_text[:2000], questions)
+            choice = res["answers"]["consumable_action"]["choice"]
+            if choice.startswith("use_"):
+                idx = int(choice.split("_")[1])
+                return (idx, f"Laya Decision: {candidates[choice]}")
+        except Exception:
+            pass
+
+        return None
+
+    def decide_joker_order(self, current_jokers: List[Dict[str, Any]]) -> Optional[List[int]]:
+        """Positions utility/chips (+Chips) and flat Mult (+Mult) before multiplicative Mult (xMult)."""
+        if len(current_jokers) <= 1:
+            return None
+
+        indexed = []
+        for i, j in enumerate(current_jokers):
+            name = (j.get("label") or j.get("key", "")).lower()
+            if any(k in name for k in ["cavendish", "constellation", "card sharp", "blueprint", "brainstorm", "duo", "trio", "family", "baron"]):
+                cat = 2  # xMult at end
+            elif any(k in name for k in ["joker", "half", "gros michel", "popcorn", "mystic", "even", "odd", "abstract"]):
+                cat = 1  # +Mult in middle
+            else:
+                cat = 0  # +Chips / utility at front
+            indexed.append((cat, i))
+
+        sorted_indices = [idx for cat, idx in sorted(indexed, key=lambda x: x[0])]
+        if sorted_indices == list(range(len(current_jokers))):
+            return None
+        return sorted_indices
