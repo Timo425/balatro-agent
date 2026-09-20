@@ -162,5 +162,15 @@ class TestBalatroAgent(unittest.TestCase):
         self.assertIn("The Hook", reasoning)
         self.assertIn("cannot be skipped", reasoning)
 
+    def test_find_weakest_joker_with_empty_modifier_list(self):
+        """Lua serializes empty {} table as [] in JSON. Test that modifier: [] does not crash!"""
+        jokers = [
+            {"label": "Joker", "key": "j_joker", "modifier": [], "cost": {"sell": 1}},
+            {"label": "Cavendish", "key": "j_cavendish", "modifier": [], "cost": {"sell": 2}}
+        ]
+        from sidecar.agent import find_weakest_joker_index
+        idx = find_weakest_joker_index(jokers)
+        self.assertEqual(idx, 0)
+
 if __name__ == "__main__":
     unittest.main()

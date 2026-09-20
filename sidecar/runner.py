@@ -88,15 +88,20 @@ class BalatroLayaRunner:
 
         shop_cards_raw = extract_cards_list(raw_g, "shop")
         dollars = raw_g.get("money", 0)
-        current_jokers = [j.get("label") or j.get("key", "") for j in extract_cards_list(raw_g, "jokers")]
-        max_jokers = raw_g.get("jokers", {}).get("max", 5)
+        current_jokers = [j.get("label") or j.get("key", "") for j in extract_cards_list(raw_g, "jokers") if isinstance(j, dict)]
+        j_obj = raw_g.get("jokers")
+        max_jokers = j_obj.get("max", 5) if isinstance(j_obj, dict) else 5
         ante = raw_g.get("ante_num", 1)
 
         shop_items = []
         for c in shop_cards_raw:
+            if not isinstance(c, dict):
+                continue
+            cost_val = c.get("cost")
+            buy_cost = cost_val.get("buy", 4) if isinstance(cost_val, dict) else (cost_val if isinstance(cost_val, int) else 4)
             shop_items.append({
                 "name": c.get("label") or c.get("key", "Unknown"),
-                "cost": c.get("cost", {}).get("buy", 4),
+                "cost": buy_cost,
                 "key": c.get("key", "")
             })
 
@@ -140,7 +145,10 @@ class BalatroLayaRunner:
         packs_raw = extract_cards_list(raw_g, "packs")
         if packs_raw and (dollars >= 25 or (ante <= 2 and len(current_jokers) < 2)):
             for p_idx, pack in enumerate(packs_raw):
-                cost = pack.get("cost", {}).get("buy", 6)
+                if not isinstance(pack, dict):
+                    continue
+                p_cost = pack.get("cost")
+                cost = p_cost.get("buy", 6) if isinstance(p_cost, dict) else (p_cost if isinstance(p_cost, int) else 6)
                 if dollars - cost >= (20 if ante >= 3 else 0):
                     pack_name = pack.get("label") or pack.get("key", "Booster Pack")
                     console.print(f"[bold green]🎁 Buying Booster Pack:[/bold green] '{pack_name}' (${cost})")
@@ -162,7 +170,8 @@ class BalatroLayaRunner:
             return
 
         state = self.client.parse_state(raw_g)
-        max_jokers = raw_g.get("jokers", {}).get("max", 5)
+        j_obj = raw_g.get("jokers")
+        max_jokers = j_obj.get("max", 5) if isinstance(j_obj, dict) else 5
 
         table = Table(title="🎁 Booster Pack Contents", show_header=True)
         table.add_column("Idx", justify="center", style="cyan")

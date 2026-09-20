@@ -77,7 +77,10 @@ def find_weakest_joker_index(jokers: List[Dict[str, Any]]) -> Optional[int]:
     """Finds the least valuable non-eternal joker to sell when slots are full."""
     candidates = []
     for idx, j in enumerate(jokers):
-        if j.get("modifier", {}).get("eternal"):
+        if not isinstance(j, dict):
+            continue
+        mod = j.get("modifier")
+        if isinstance(mod, dict) and mod.get("eternal"):
             continue  # Cannot be sold
         name = (j.get("label") or j.get("key", "")).lower()
         cat = classify_joker(name)
@@ -299,7 +302,8 @@ class BalatroAgent:
             weakest_idx = find_weakest_joker_index(current_jokers_raw)
             if weakest_idx is not None:
                 weakest_joker = current_jokers_raw[weakest_idx]
-                sell_val = weakest_joker.get("cost", {}).get("sell", 1)
+                cost_obj = weakest_joker.get("cost") if isinstance(weakest_joker, dict) else None
+                sell_val = cost_obj.get("sell", 1) if isinstance(cost_obj, dict) else (cost_obj if isinstance(cost_obj, int) else 1)
                 effective_money = state.money + sell_val
 
                 for idx, item in enumerate(shop_items):
