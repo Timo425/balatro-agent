@@ -22,7 +22,6 @@ from rich.table import Table
 from rich.panel import Panel
 
 from sidecar.client import BalatroBotClient, extract_cards_list
-from sidecar.bench import BalatroLauncher, detect_steam_root, detect_proton_path, detect_compat_data, detect_balatro_exe
 
 console = Console()
 SESSION_FILE = ROOT_DIR / ".bench_session.json"
@@ -172,15 +171,8 @@ def cmd_bench_start(args, client):
     # Check health / auto-launch
     if not client.health():
         console.print("[yellow]BalatroBot ei vasta, käivitan Balatro automaatselt...[/yellow]")
-        steam_root = detect_steam_root()
-        proton_path = detect_proton_path(steam_root)
-        compat_data = detect_compat_data(steam_root)
-        balatro_exe = detect_balatro_exe(steam_root)
+        from sidecar.bench import BalatroLauncher
         launcher = BalatroLauncher(
-            steam_root=steam_root,
-            proton_path=proton_path,
-            compat_data=compat_data,
-            balatro_exe=balatro_exe,
             port=12346,
             fast=True,
             headless=False,
