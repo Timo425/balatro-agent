@@ -229,10 +229,8 @@ class BalatroLayaRunner:
             return False
 
         elif current_state == "MENU":
-            console.print("[dim]In Menu - Starting new Red Deck White Stake run...[/dim]")
-            self.client.start_game("RED", "WHITE")
             time.sleep(1.0)
-            return True
+            return False
 
         return False
 
