@@ -326,20 +326,25 @@ did, not judgement. So the benchmark that justified routing tested something
 easier than the thing being routed.
 
 The `greedy` probe settles it: always play the biggest hand on offer, never dig.
-Two lines, no model. Over 24 seeds, tree mode, no jokers:
+Two lines, no model. Over 60 seeds, tree mode, no jokers:
 
 | policy | mean rounds won |
 | --- | ---: |
-| `random` | 0.38 |
-| **`greedy`** -- plain Python `max()` | **1.00** |
-| `first` | 1.04 |
-| **`laya`** | **1.17** |
-| `label` -- reads the labels and digs | 2.38 |
+| `random` | 0.53 ± 0.09 |
+| **`greedy`** -- plain Python `max()` | **0.93 ± 0.09** |
+| `first` | 0.95 ± 0.10 |
+| **`laya`** | **1.07** |
+| `label` -- reads the labels and digs | 2.30 ± 0.11 |
 
-The model is a whisker ahead of the rule it was supposed to replace, and both sit
-far below a reader that also digs. So the whole gap that matters at this level --
-1.00 to 2.38 -- is the play-or-dig call, which is a question about a quantity,
-which is exactly what this model does not answer.
+The model is about four standard errors clear of random, so it is certainly doing
+something. It is about one standard error clear of the rule it was supposed to
+justify replacing, which is to say not clear of it at all. (At 24 seeds the same
+comparison read 1.17 against 1.00; the larger sample pulled it down, which is the
+usual direction for a number one was hoping would hold.)
+
+So the whole gap that matters at this level -- 0.93 to 2.30 -- is the play-or-dig
+call, which is a question about a quantity, which is exactly what this model does
+not answer.
 
 Routing the hand node to the cheap model would therefore hand it the decision
 that needs judgement while saving the calls that were nearly free. `HybridBackend`

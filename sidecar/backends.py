@@ -421,12 +421,13 @@ class HybridBackend(BaseBackend):
     scores more", and Python computed those chip counts in order to write the
     labels -- so a right answer there is agreement with arithmetic, not judgement.
     Measured against a two-line Python rule that always plays the biggest hand and
-    never digs, over 24 seeds:
+    never digs, over 60 seeds (mean rounds won, +/- one standard error):
 
-        random 0.38   greedy 1.00   first 1.04   laya 1.17   label 2.38
+        random 0.53+/-0.09   greedy 0.93+/-0.09   laya 1.07   label 2.30+/-0.11
 
-    The model is a whisker ahead of the rule it was supposed to justify replacing,
-    and both are far below a reader that also digs. The value at that node is the
+    The model is four standard errors clear of random and about one clear of the
+    rule it was supposed to justify replacing -- which is to say, not clear of it.
+    Both sit far below a reader that also digs. The value at that node is the
     play-or-dig call, which the model does not make -- so routing the node to it
     would hand the cheap model a decision that needs judgement, on the strength of
     a benchmark that tested something easier.

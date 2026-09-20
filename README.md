@@ -94,10 +94,11 @@ Mean rounds won on the offline simulator (Red-deck rules, no shop, no jokers):
 
 | Player | Tree | Flat |
 | --- | ---: | ---: |
-| `random` | 0.70 | 0.40 |
-| `first` — always option 1 | 0.92 | 0.92 |
-| **`laya`** (typed-decisions, zero-shot) | **1.04** | 0.75 |
-| `label` — a fixed reader of the option text | 2.28 | 1.62 |
+| `random` | 0.53 | 0.40 |
+| `greedy` — plain Python `max()`, never digs | 0.93 | — |
+| `first` — always option 1 | 0.95 | 0.92 |
+| **`laya`** (typed-decisions, zero-shot) | **1.07** | 0.71 |
+| `label` — a fixed reader of the option text | 2.30 | 1.62 |
 
 In the actual game, over 15 seeds (5 official + 10 random, `fallbacks: 0`), it
 clears Ante 1 in **4 runs out of 15** and has cleared Ante 2 once, reaching
@@ -115,8 +116,8 @@ So the next step is a fine-tune, and `--dump` produces the data for it: every
 question, its options, the answer, and whether that round was won.
 
 One caution the stress probes make concrete: `greedy` -- a two-line Python rule
-that always plays the biggest hand and never digs -- scores 1.00 against the
-model's 1.17, while a reader that also *digs* scores 2.38. Most of what separates
+that always plays the biggest hand and never digs -- scores 0.93 ± 0.09 against
+the model's 1.07 over 60 seeds, while a reader that also *digs* scores 2.30. Most of what separates
 a bad player from a decent one here is the play-or-dig call, and that is a
 question about a quantity, which is what this model cannot answer. Any node where
 a model does not clear `greedy` is a node where it is rubber-stamping arithmetic
