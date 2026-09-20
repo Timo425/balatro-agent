@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import laya
 from sidecar.poker_eval import Card, PokerEvaluator
 from sidecar.strategy import StrategyManager
 from sidecar.backends import BaseBackend, create_backend

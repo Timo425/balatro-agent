@@ -30,8 +30,9 @@ def get_client(endpoint: str = "http://127.0.0.1:12346") -> BalatroBotClient:
     return BalatroBotClient(endpoint=endpoint)
 
 def format_card(c: Dict[str, Any]) -> str:
-    r = c.get("value") or c.get("rank") or "?"
-    s = c.get("suit") or "?"
+    val_obj = c.get("value", {}) if isinstance(c, dict) else {}
+    r = str(val_obj.get("rank") or c.get("rank") or "?")
+    s = str(val_obj.get("suit") or c.get("suit") or "?")
     enh = c.get("enhancement") or ""
     enh_str = f" [{enh}]" if enh else ""
     return f"{r} of {s}{enh_str}"
@@ -46,15 +47,23 @@ def print_status(client: BalatroBotClient):
     ante = raw_g.get("ante_num", 1)
     round_num = raw_g.get("round_num", 1)
     money = raw_g.get("money", 0)
-    hands_left = raw_g.get("hands_left", 0)
-    discards_left = raw_g.get("discards_left", 0)
 
     round_info = raw_g.get("round", {})
+    hands_left = round_info.get("hands_left", raw_g.get("hands_left", 0))
+    discards_left = round_info.get("discards_left", raw_g.get("discards_left", 0))
     chips = round_info.get("chips", 0)
-    target_chips = round_info.get("target_chips", 0)
-    blind_info = raw_g.get("blind", {})
-    blind_name = blind_info.get("label") or blind_info.get("name") or "Blind"
-    blind_desc = blind_info.get("desc") or ""
+
+    target_chips = 0
+    blind_name = "Blind"
+    blind_desc = ""
+    blinds = raw_g.get("blinds", {})
+    if isinstance(blinds, dict):
+        for b_k, b_v in blinds.items():
+            if isinstance(b_v, dict) and b_v.get("status") in ("CURRENT", "SELECTING", "ACTIVE"):
+                target_chips = b_v.get("score", 0)
+                blind_name = b_v.get("name", b_k)
+                blind_desc = b_v.get("effect", "")
+                break
 
     header = (
         f"[bold white]State:[/bold white] [bold cyan]{state}[/bold cyan] | "
@@ -110,8 +119,9 @@ def print_status(client: BalatroBotClient):
             t_h.add_column("Suit", style="green")
             t_h.add_column("Rank", style="magenta")
             for i, c in enumerate(hand_cards):
-                r = c.get("value") or c.get("rank") or "?"
-                s = c.get("suit") or "?"
+                val_obj = c.get("value", {}) if isinstance(c, dict) else {}
+                r = str(val_obj.get("rank") or c.get("rank") or "?")
+                s = str(val_obj.get("suit") or c.get("suit") or "?")
                 t_h.add_row(str(i), format_card(c), s, r)
             console.print(t_h)
             console.print("[dim]Use: `python sidecar/cli.py play 0 1 2 3 4` or `discard 0 1`[/dim]")

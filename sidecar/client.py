@@ -49,11 +49,19 @@ def extract_cards_list(raw_g: Dict[str, Any], key: str) -> List[Dict[str, Any]]:
 class BalatroBotClient:
     """HTTP JSON-RPC 2.0 client communicating with coder/balatrobot v1.5.2+."""
 
-    def __init__(self, endpoint: str = "http://127.0.0.1:12346", rules_path: str = "rules/balatro-strategy.md", agent: Optional[BalatroAgent] = None):
+    def __init__(self, endpoint: str = "http://127.0.0.1:12346", rules_path: str = "rules/balatro-strategy.md", agent: Optional[Any] = None):
         self.endpoint = endpoint
-        self.agent = agent if agent is not None else BalatroAgent(rules_path=rules_path)
+        self.rules_path = rules_path
+        self._agent = agent
         self.rpc_id = 1
         self.client = httpx.Client(base_url=self.endpoint, timeout=30.0)
+
+    @property
+    def agent(self) -> Any:
+        if self._agent is None:
+            from sidecar.agent import BalatroAgent
+            self._agent = BalatroAgent(rules_path=self.rules_path)
+        return self._agent
 
     def send_rpc(self, method: str, params: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         payload = {
