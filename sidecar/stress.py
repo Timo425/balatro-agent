@@ -317,6 +317,23 @@ def run_stress(
     return report
 
 
+def compare(policy: str, mode: str, seeds: Sequence[int], jokers, max_ante: int,
+            node: str, binary: str) -> Dict[str, StressReport]:
+    """Runs the policy, random and the label reader over the same seeds.
+
+    The gap between the policy and `random` is how much the model is actually
+    contributing. If a change to the tree makes that gap shrink towards zero
+    while the score stays up, the tree has started playing the game itself and
+    the model is only rubber-stamping it -- which is the failure this repository
+    exists to avoid, and it is invisible unless measured.
+    """
+    return {
+        name: run_stress(policy=name, mode=mode, seeds=seeds, jokers=jokers,
+                         max_ante=max_ante, node=node, binary=binary)
+        for name in (policy, "random", "label")
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Stress-test Balatro decision trees offline.")
     parser.add_argument("--policy", default="label",
@@ -331,6 +348,9 @@ def main() -> None:
     parser.add_argument("--max-ante", type=int, default=3)
     parser.add_argument("--jokers", default="", help="Comma-separated keys from JOKER_LIBRARY")
     parser.add_argument("--verbose", action="store_true", help="Print every action of seed 0")
+    parser.add_argument("--compare", action="store_true",
+                        help="Also run random and the label reader over the same seeds, and "
+                             "report how much the policy is contributing over random")
     parser.add_argument("--dump", default=None, metavar="PATH",
                         help="Write every question, answer and round outcome to a JSONL "
                              "file -- reward-labelled data for fine-tuning a decision model")
@@ -342,10 +362,28 @@ def main() -> None:
     joker_note = ", ".join(j.name for j in jokers) if jokers else "none"
     print(f"Stress: {args.seeds} seeds, up to Ante {args.max_ante}, jokers: {joker_note}\n")
     for mode in modes:
-        report = run_stress(policy=args.policy, mode=mode, node=args.node,
-                            seeds=range(args.seeds), jokers=jokers, max_ante=args.max_ante,
-                            record=bool(args.dump), binary=args.binary)
-        print(report.summary())
+        if args.compare:
+            reports = compare(args.policy, mode, range(args.seeds), jokers,
+                              args.max_ante, args.node, args.binary)
+            for name in reports:
+                print(reports[name].summary())
+            policy_mean = statistics.mean(reports[args.policy].rounds_won or [0])
+            random_mean = statistics.mean(reports["random"].rounds_won or [0])
+            label_mean = statistics.mean(reports["label"].rounds_won or [0])
+            gap = policy_mean - random_mean
+            headroom = label_mean - policy_mean
+            print(f"\n  {args.policy} over random: {gap:+.2f} rounds"
+                  f"   (headroom to a perfect label reader: {headroom:+.2f})")
+            if gap <= 0.1:
+                print("  ** the policy is not beating random: either the model is not "
+                      "answering, or the tree is playing for it **")
+            print()
+            report = reports[args.policy]
+        else:
+            report = run_stress(policy=args.policy, mode=mode, node=args.node,
+                                seeds=range(args.seeds), jokers=jokers, max_ante=args.max_ante,
+                                record=bool(args.dump), binary=args.binary)
+            print(report.summary())
         if args.dump:
             path = Path(args.dump)
             path.parent.mkdir(parents=True, exist_ok=True)
