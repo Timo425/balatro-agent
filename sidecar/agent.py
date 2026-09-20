@@ -29,6 +29,7 @@ from sidecar.candidates import (
     pick_filler,
 )
 from sidecar.poker_eval import Card
+from sidecar.scoring import strength_label
 from sidecar.strategy import StrategyManager
 from sidecar.synergy import JokerSynergyAnalyzer, SynergyProfile
 
@@ -355,10 +356,23 @@ class BalatroAgent:
         Node 3  send filler? yes/no -- only when the chosen hand is under five cards
         """
         if facts.discards and state.discards_left > 0:
+            # The verdicts go in the statement, not only in the brief: a question's
+            # instructions are never truncated once the options are short, while
+            # the state is cut from the end. Listing them in enumeration order is
+            # an inventory of what exists, not a ranking of it.
+            verdicts = ", ".join(
+                strength_label(o.estimate.total, facts.needed)
+                for o in facts.plays if o.estimate is not None
+            )
             dig = self._ask_bool(
                 facts.play_context,
                 "dig_for_better_hand",
-                "Should the player throw cards away and draw new ones instead of playing a hand now?",
+                (
+                    f"The hands available right now are rated: {verdicts}. "
+                    f"{state.hands_left} hands and {state.discards_left} discards are left. "
+                    "Should the player throw cards away and draw new ones instead of "
+                    "playing one of those hands?"
+                ),
                 "throw cards away now and draw replacements",
                 "play one of the hands listed above now",
                 on_failure=False,
