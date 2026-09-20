@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from sidecar.poker_eval import HAND_TYPE_ORDER, Card, PokerEvaluator
-from sidecar.scoring import ScoreEstimate, describe_estimate, estimate_play
+from sidecar.scoring import ScoreEstimate, describe_estimate, estimate_play, strength_label
 
 MAX_DISCARD = 5
 MAX_PLAY = 5
@@ -43,12 +43,19 @@ class PlayOption:
         return self.core + self.filler
 
     def label(self, needed: int, hands_left: int) -> str:
-        """Short, non-comparative model-facing text."""
+        """Short, non-comparative model-facing text, verdict first.
+
+        `WINS - Flush AS KS QS JS 9S: ~340 chips, wins now`. The verdict leads
+        because option text is clipped from the end under a tight head budget,
+        and a word is a far stronger signal to a pattern matcher than a number.
+        It describes this option against the blind, never against the others.
+        """
         cards = " ".join(c.short for c in self.core)
-        head = f"{self.hand_type} {cards}"
+        body = f"{self.hand_type} {cards}"
         if self.estimate is None:
-            return head
-        return f"{head}: {describe_estimate(self.estimate, needed, hands_left)}"
+            return body
+        verdict = strength_label(self.estimate.total, needed)
+        return f"{verdict} - {body}: {describe_estimate(self.estimate, needed, hands_left)}"
 
 
 @dataclass

@@ -332,7 +332,7 @@ class BalatroAgent:
         choice = self._choose(
             facts.play_context,
             "hand_action",
-            "Which move should the player make now?",
+            "Pick the move that best gets the player to the chips this blind needs.",
             criteria,
         )
         if choice is None:
@@ -378,7 +378,7 @@ class BalatroAgent:
             criteria = self._play_criteria(facts, state, options)
             key = self._pick(
                 facts.play_context, "which_hand",
-                "Which hand should the player play?", criteria,
+                "Pick the hand that scores the most chips towards beating this blind.", criteria,
                 statement_for=lambda _key, label: f"The player should play {label}",
             )
             chosen = next((o for o in options if o.key == key), None)
@@ -409,7 +409,7 @@ class BalatroAgent:
             type_criteria[key] = f"{sample}{extra}"
 
         chosen_type = self._choose(facts.play_context, "which_hand_type",
-                                   "Which kind of poker hand should the player play?",
+                                   "Pick the kind of poker hand that scores the most chips here.",
                                    type_criteria)
         if chosen_type is None:
             return None
@@ -423,7 +423,7 @@ class BalatroAgent:
         criteria = self._play_criteria(facts, state, members)
         key = self._pick(
             facts.play_context, "which_hand_of_type",
-            "Which one of these should the player play?", criteria,
+            "Pick the hand that scores the most chips towards beating this blind.", criteria,
             statement_for=lambda _key, label: f"The player should play {label}",
         )
         return next((o for o in members if o.key == key), None)
@@ -463,7 +463,7 @@ class BalatroAgent:
         criteria = {p.key: p.label(state.discards_left) for p in plans}
         key = self._pick(
             facts.discard_context, "which_discard",
-            "Which cards should the player throw away?", criteria,
+            "Pick the cards to throw away so the next draw makes a stronger hand.", criteria,
             statement_for=lambda _key, label: f"The player should {label}",
         )
         plan = next((p for p in plans if p.key == key), None)
@@ -571,7 +571,7 @@ class BalatroAgent:
             for idx, item in entries
         }
         criteria["leave_shop"] = f"buy nothing and keep ${state.money} (earns ${interest} interest)"
-        choice = self._choose(context, "shop_action", "What should the player buy?", criteria)
+        choice = self._choose(context, "shop_action", "Pick what to buy to make the deck score more chips in later rounds.", criteria)
         if choice is None or choice == "leave_shop":
             return None
         return self._entry_for_key(choice, entries)
@@ -605,7 +605,7 @@ class BalatroAgent:
             return None
         categories["cat_save"] = f"nothing, keep ${state.money} (earns ${interest} interest)"
 
-        chosen = self._choose(context, "shop_category", "What should the player spend money on?", categories)
+        chosen = self._choose(context, "shop_category", "Pick what to spend money on to score more chips in later rounds.", categories)
         if chosen is None or chosen == "cat_save":
             return None
 
@@ -619,7 +619,7 @@ class BalatroAgent:
             f"buy{idx}_{_slug(_name_of(item))}": self._shop_item_label(item, state.money, profile)
             for idx, item in entries
         }
-        pick = self._choose(context, "which_shop_item", "Which one should the player buy?", criteria)
+        pick = self._choose(context, "which_shop_item", "Pick the one that makes the deck score more chips in later rounds.", criteria)
         if pick is None:
             return None
         return self._entry_for_key(pick, entries)

@@ -252,8 +252,13 @@ def pace_label(score: int, needed: int, hands_left: int) -> str:
 
 
 def describe_estimate(est: ScoreEstimate, needed: int, hands_left: int) -> str:
-    """Short model-facing summary of one candidate: `~108 chips, WEAK, 3 more like it still lose`."""
-    parts = [f"~{est.total} chips", strength_label(est.total, needed), pace_label(est.total, needed, hands_left)]
+    """Detail half of an option's text: `~108 chips, 3 more like it still lose`.
+
+    The verdict word is returned separately by `strength_label` so callers can put
+    it first, where it survives option truncation and is the token a pattern
+    matcher has the best chance with.
+    """
+    parts = [f"~{est.total} chips", pace_label(est.total, needed, hands_left)]
     if est.uncertain:
         parts.append("plus unread joker text")
     return ", ".join(parts)
