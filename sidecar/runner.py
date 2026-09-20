@@ -10,7 +10,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from sidecar.client import BalatroBotClient
+from sidecar.client import BalatroBotClient, extract_cards_list
 from sidecar.agent import BalatroGameState, AgentAction
 
 console = Console()
@@ -26,7 +26,7 @@ class BalatroLayaRunner:
 
     def check_joker_rearrange(self, raw_g: dict):
         """Ensures RULE_JOKER_ORDER (+Chips -> +Flat Mult -> +Scaling -> X-Mult)."""
-        jokers = raw_g.get("jokers", {}).get("cards", [])
+        jokers = extract_cards_list(raw_g, "jokers")
         if len(jokers) > 1:
             new_order = self.agent.decide_joker_order(jokers)
             if new_order is not None:
@@ -36,7 +36,7 @@ class BalatroLayaRunner:
 
     def check_consumables(self, raw_g: dict) -> bool:
         """Ensures RULE_USE_PLANET & RULE_USE_TAROT."""
-        consumables = raw_g.get("consumables", {}).get("cards", [])
+        consumables = extract_cards_list(raw_g, "consumables")
         if not consumables:
             return False
 
@@ -86,9 +86,9 @@ class BalatroLayaRunner:
 
         self.check_joker_rearrange(raw_g)
 
-        shop_cards_raw = raw_g.get("shop", {}).get("cards", [])
+        shop_cards_raw = extract_cards_list(raw_g, "shop")
         dollars = raw_g.get("money", 0)
-        current_jokers = [j.get("label") or j.get("key", "") for j in raw_g.get("jokers", {}).get("cards", [])]
+        current_jokers = [j.get("label") or j.get("key", "") for j in extract_cards_list(raw_g, "jokers")]
         max_jokers = raw_g.get("jokers", {}).get("max", 5)
         ante = raw_g.get("ante_num", 1)
 
@@ -137,7 +137,7 @@ class BalatroLayaRunner:
                 return
 
         # Check Booster packs
-        packs_raw = raw_g.get("packs", {}).get("cards", [])
+        packs_raw = extract_cards_list(raw_g, "packs")
         if packs_raw and (dollars >= 25 or (ante <= 2 and len(current_jokers) < 2)):
             for p_idx, pack in enumerate(packs_raw):
                 cost = pack.get("cost", {}).get("buy", 6)
@@ -155,7 +155,7 @@ class BalatroLayaRunner:
 
     def handle_booster_pack(self, raw_g: dict):
         """Handles opened booster pack (SMODS_BOOSTER_OPENED state)."""
-        pack_cards = raw_g.get("pack", {}).get("cards", [])
+        pack_cards = extract_cards_list(raw_g, "pack")
         if not pack_cards:
             console.print("[yellow]Pack empty, skipping...[/yellow]")
             self.client.select_pack_card(skip=True)
@@ -204,7 +204,7 @@ class BalatroLayaRunner:
             self.last_state_name = current_state
 
         if current_state == "SELECTING_HAND":
-            cards = raw_state.get("hand", {}).get("cards", [])
+            cards = extract_cards_list(raw_state, "hand")
             if not cards:
                 return False
             self.handle_hand_decision(raw_state)

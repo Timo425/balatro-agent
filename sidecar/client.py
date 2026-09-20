@@ -34,6 +34,18 @@ RANK_MAP = {
     "Jack": "J",
 }
 
+def extract_cards_list(raw_g: Dict[str, Any], key: str) -> List[Dict[str, Any]]:
+    """Safely extracts a list of card objects from game area, handling both dict and list representations."""
+    if not isinstance(raw_g, dict):
+        return []
+    val = raw_g.get(key)
+    if isinstance(val, dict):
+        cards = val.get("cards", [])
+        return cards if isinstance(cards, list) else []
+    elif isinstance(val, list):
+        return val
+    return []
+
 class BalatroBotClient:
     """HTTP JSON-RPC 2.0 client communicating with coder/balatrobot v1.5.2+."""
 
@@ -131,10 +143,10 @@ class BalatroBotClient:
 
     def parse_state(self, raw_g: Dict[str, Any]) -> BalatroGameState:
         """Translates coder/balatrobot gamestate to BalatroGameState."""
-        raw_hand = raw_g.get("hand", {}).get("cards", [])
+        raw_hand = extract_cards_list(raw_g, "hand")
         hand_cards = []
         for i, c in enumerate(raw_hand):
-            val_obj = c.get("value", {})
+            val_obj = c.get("value", {}) if isinstance(c, dict) else {}
             raw_suit = val_obj.get("suit", "S")
             raw_rank = val_obj.get("rank", "2")
 
@@ -142,20 +154,21 @@ class BalatroBotClient:
             rank = RANK_MAP.get(raw_rank, raw_rank)
             hand_cards.append(Card(rank=rank, suit=suit, id=i))
 
-        raw_jokers = raw_g.get("jokers", {}).get("cards", [])
-        jokers = [j.get("label") or j.get("key", "Joker") for j in raw_jokers]
+        raw_jokers = extract_cards_list(raw_g, "jokers")
+        jokers = [j.get("label") or j.get("key", "Joker") for j in raw_jokers if isinstance(j, dict)]
 
-        blinds = raw_g.get("blinds", {})
+        blinds = raw_g.get("blinds", {}) if isinstance(raw_g.get("blinds"), dict) else {}
         target_chips = 300
         blind_name = "Small Blind"
         for b_key, b_info in blinds.items():
-            status = b_info.get("status", "")
-            if status in ("SELECTING", "CURRENT", "ACTIVE") or b_info.get("selected"):
-                target_chips = b_info.get("chips", 300)
-                blind_name = b_info.get("name", b_key.capitalize() + " Blind")
-                break
+            if isinstance(b_info, dict):
+                status = b_info.get("status", "")
+                if status in ("SELECTING", "CURRENT", "ACTIVE") or b_info.get("selected"):
+                    target_chips = b_info.get("chips", 300)
+                    blind_name = b_info.get("name", b_key.capitalize() + " Blind")
+                    break
 
-        round_info = raw_g.get("round", {})
+        round_info = raw_g.get("round", {}) if isinstance(raw_g.get("round"), dict) else {}
         current_chips = round_info.get("chips", 0)
         hands_left = round_info.get("hands_left", 4)
         discards_left = round_info.get("discards_left", 3)

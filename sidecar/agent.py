@@ -276,7 +276,13 @@ class BalatroAgent:
         if not shop_items or state.money < 3:
             return None
 
-        current_jokers_raw = raw_g.get("jokers", {}).get("cards", []) if raw_g else []
+        val_j = raw_g.get("jokers") if raw_g else None
+        if isinstance(val_j, dict):
+            current_jokers_raw = val_j.get("cards", [])
+        elif isinstance(val_j, list):
+            current_jokers_raw = val_j
+        else:
+            current_jokers_raw = []
         jokers_count = len(current_jokers_raw) if current_jokers_raw else len(state.jokers)
         can_hold_joker = jokers_count < max_jokers
 
