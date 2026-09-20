@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import laya
 from sidecar.poker_eval import Card, PokerEvaluator
 from sidecar.strategy import StrategyManager
+from sidecar.backends import BaseBackend, create_backend
 
 DEFAULT_HAND_SCORES = {
     "Straight Flush": (100, 8),
@@ -66,11 +67,22 @@ def find_weakest_joker_index(jokers: List[Dict[str, Any]]) -> Optional[int]:
 class BalatroAgent:
     """Autonomous Balatro agent where Laya makes 100% of game decisions."""
 
-    def __init__(self, rules_path: str = "rules/balatro-strategy.md", strategy_name: str = "default"):
+    def __init__(
+        self,
+        rules_path: str = "rules/balatro-strategy.md",
+        strategy_name: str = "default",
+        backend: Any = "laya",
+        model: Optional[str] = None,
+        **backend_kwargs,
+    ):
         self.rules_path = Path(rules_path)
         self.strategy_name = strategy_name
         self.sm = StrategyManager(strategy_name)
-        self.agent = laya.load("convaiinnovations/laya")
+        if isinstance(backend, BaseBackend):
+            self.backend = backend
+        else:
+            self.backend = create_backend(backend_type=str(backend), model=model, **backend_kwargs)
+        self.agent = getattr(self.backend, "agent", None)
 
     def _render_state(self, raw_g: Optional[Dict[str, Any]], state: Optional[BalatroGameState] = None) -> str:
         """Renders gamestate markdown via BalatroLLM Jinja template."""
@@ -394,13 +406,17 @@ class BalatroAgent:
         }
 
         try:
-            res = self.agent.predict(gamestate_text[:2000], questions)
-            choice = res["answers"]["pack_choice"]["choice"]
+            choice = self.backend.predict_choice(
+                gamestate_text[:2000],
+                "pack_choice",
+                "Evaluate the booster pack offerings and select the card that best improves the current deck and jokers.",
+                candidates,
+            )
             if choice.startswith("card_"):
                 chosen_idx = int(choice.split("_")[1])
                 chosen_card = pack_cards[chosen_idx]
                 card_name = chosen_card.get("label") or chosen_card.get("key", "")
-                return (chosen_idx, None, f"Laya Decision: Selected '{card_name}' from pack.")
+                return (chosen_idx, None, f"Decision: Selected '{card_name}' from pack.")
         except Exception:
             pass
 
@@ -459,8 +475,12 @@ class BalatroAgent:
         }
 
         try:
-            res = self.agent.predict(gamestate_text[:2000], questions)
-            choice = res["answers"]["tarot_target"]["choice"]
+            choice = self.backend.predict_choice(
+                gamestate_text[:2000],
+                "tarot_target",
+                f"You are applying Tarot card '{tarot_name}'. Select the single best card in hand to enhance, convert, or destroy based on your strategy.",
+                candidates,
+            )
             if choice.startswith("card_"):
                 chosen_idx = int(choice.split("_")[1])
                 return [chosen_idx]
@@ -500,15 +520,19 @@ class BalatroAgent:
         }
 
         try:
-            res = self.agent.predict(gamestate_text[:2000], questions)
-            choice = res["answers"]["consumable_action"]["choice"]
+            choice = self.backend.predict_choice(
+                gamestate_text[:2000],
+                "consumable_action",
+                "Determine whether to use an available consumable card now or hold it in inventory. Using planets or money tarot immediately is usually optimal.",
+                candidates,
+            )
             if choice.startswith("use_"):
                 idx = int(choice.split("_")[1])
                 name = consumables[idx].get("label") or consumables[idx].get("key", "")
                 val_obj = consumables[idx].get("value", {}) if isinstance(consumables[idx], dict) else {}
                 eff = val_obj.get("effect", "") if isinstance(val_obj, dict) else ""
                 targets = self.decide_tarot_targets(name, hand=hand, raw_g=raw_g, effect=eff)
-                return (idx, targets, f"Laya Decision: {candidates[choice]} (targets={targets})")
+                return (idx, targets, f"Decision: {candidates[choice]} (targets={targets})")
         except Exception:
             pass
 
@@ -572,8 +596,12 @@ class BalatroAgent:
         }
 
         try:
-            res = self.agent.predict(prompt_text, questions)
-            choice = res["answers"]["order"]["choice"]
+            choice = self.backend.predict_choice(
+                prompt_text,
+                "order",
+                "Select the optimal left-to-right arrangement of Jokers to maximize final score.",
+                candidates,
+            )
             if choice == "order_optimized":
                 return candidate_order
             elif choice == "order_original":

@@ -18,9 +18,19 @@ console = Console()
 class BalatroLayaRunner:
     """Autonomous HTTP JSON-RPC 2.0 Runner connecting Laya Agent to coder/balatrobot."""
 
-    def __init__(self, endpoint: str = "http://127.0.0.1:12346", rules_path: str = "rules/balatro-strategy.md"):
+    def __init__(
+        self,
+        endpoint: str = "http://127.0.0.1:12346",
+        rules_path: str = "rules/balatro-strategy.md",
+        agent: Optional[Any] = None,
+        backend: str = "laya",
+        model: Optional[str] = None,
+        **backend_kwargs
+    ):
         self.endpoint = endpoint
-        self.client = BalatroBotClient(endpoint=endpoint, rules_path=rules_path)
+        if agent is None:
+            agent = BalatroAgent(rules_path=rules_path, backend=backend, model=model, **backend_kwargs)
+        self.client = BalatroBotClient(endpoint=endpoint, rules_path=rules_path, agent=agent)
         self.agent = self.client.agent
         self.last_state_name = None
 
