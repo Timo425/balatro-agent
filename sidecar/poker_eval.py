@@ -69,6 +69,12 @@ class Card:
     rank: str
     suit: str
     id: int = 0
+    #: Boss blinds such as The Mark and The Wheel deal cards face down. Their rank
+    #: and suit are unknown until they are played, so nothing can be built on them.
+    face_down: bool = False
+    #: Boss blinds such as The Club debuff a whole suit. A debuffed card still
+    #: counts towards the hand type but contributes no chips.
+    debuffed: bool = False
 
     @property
     def value(self) -> int:
@@ -79,12 +85,22 @@ class Card:
         return RANK_CHIPS.get(self.rank, 0)
 
     @property
+    def scoring_chip_value(self) -> int:
+        """Chips this card actually contributes, which is none when debuffed."""
+        return 0 if self.debuffed else self.chip_value
+
+    @property
     def short(self) -> str:
         """Compact label such as `9S` / `10H` used in model-facing option text."""
-        return f"{self.rank}{self.suit[0] if self.suit else '?'}"
+        if self.face_down:
+            return "??"
+        label = f"{self.rank}{self.suit[0] if self.suit else '?'}"
+        return f"{label}(debuffed)" if self.debuffed else label
 
     def __repr__(self):
-        return f"{self.rank} of {self.suit}"
+        if self.face_down:
+            return "face-down card"
+        return f"{self.rank} of {self.suit}" + (" (debuffed)" if self.debuffed else "")
 
 
 @dataclass
@@ -166,8 +182,8 @@ class PokerEvaluator:
 
     @staticmethod
     def scoring_chips(scoring_cards: List[Card]) -> int:
-        """Chips contributed by the cards that actually score."""
-        return sum(c.chip_value for c in scoring_cards)
+        """Chips contributed by the cards that actually score, debuffs included."""
+        return sum(c.scoring_chip_value for c in scoring_cards)
 
     @classmethod
     def evaluate_5card_score(

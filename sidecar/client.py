@@ -155,12 +155,19 @@ class BalatroBotClient:
         hand_cards = []
         for i, c in enumerate(raw_hand):
             val_obj = c.get("value", {}) if isinstance(c, dict) else {}
-            raw_suit = val_obj.get("suit", "S")
-            raw_rank = val_obj.get("rank", "2")
-
-            suit = SUIT_MAP.get(raw_suit, raw_suit)
-            rank = RANK_MAP.get(raw_rank, raw_rank)
-            hand_cards.append(Card(rank=rank, suit=suit, id=i))
+            c_state = c.get("state", {}) if isinstance(c, dict) else {}
+            c_state = c_state if isinstance(c_state, dict) else {}
+            raw_suit = val_obj.get("suit")
+            raw_rank = val_obj.get("rank")
+            # A face-down card reports no rank or suit. Defaulting it to the 2 of
+            # Spades, as this used to, invents a card the player does not have and
+            # feeds it into every hand the model is offered.
+            face_down = bool(c_state.get("hidden")) or raw_rank is None or raw_suit is None
+            suit = SUIT_MAP.get(raw_suit, raw_suit) if raw_suit else "?"
+            rank = RANK_MAP.get(raw_rank, raw_rank) if raw_rank else "?"
+            hand_cards.append(Card(rank=rank, suit=suit, id=i,
+                                   face_down=face_down,
+                                   debuffed=bool(c_state.get("debuff"))))
 
         raw_jokers = extract_cards_list(raw_g, "jokers")
         jokers = [j.get("label") or j.get("key", "Joker") for j in raw_jokers if isinstance(j, dict)]

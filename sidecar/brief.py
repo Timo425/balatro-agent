@@ -40,16 +40,23 @@ def hand_brief(
     options: Sequence[PlayOption],
     synergy_summary: str = "",
     notes: Sequence[str] = (),
+    blind_effect: str = "",
 ) -> str:
     lines = [
         f"Balatro. Ante {ante}, {blind_name}.",
         f"Need {needed} more chips. {hands_left} hands and {discards_left} discards left.",
-        _joker_line(jokers),
     ]
+    if blind_effect:
+        lines.append(f"This blind's rule: {blind_effect}")
+    lines.append(_joker_line(jokers))
     if synergy_summary:
         lines.append(f"Your jokers reward: {synergy_summary}")
     lines.extend(notes)
     lines.append("Cards in hand: " + " ".join(c.short for c in hand))
+    hidden = sum(1 for c in hand if getattr(c, "face_down", False))
+    if hidden:
+        noun = "card is" if hidden == 1 else "cards are"
+        lines.append(f"{hidden} {noun} face down (?? above): rank and suit unknown until played.")
     if options:
         lines.append("Hands you can make right now:")
         for opt in options:
@@ -67,12 +74,15 @@ def discard_brief(
     plans: Sequence[DiscardPlan],
     synergy_summary: str = "",
     notes: Sequence[str] = (),
+    blind_effect: str = "",
 ) -> str:
     lines = [
         f"Balatro. Ante {ante}, {blind_name}.",
         f"Need {needed} more chips. {hands_left} hands and {discards_left} discards left.",
-        "Cards in hand: " + " ".join(c.short for c in hand),
     ]
+    if blind_effect:
+        lines.append(f"This blind's rule: {blind_effect}")
+    lines.append("Cards in hand: " + " ".join(c.short for c in hand))
     if synergy_summary:
         lines.append(f"Your jokers reward: {synergy_summary}")
     lines.extend(notes)

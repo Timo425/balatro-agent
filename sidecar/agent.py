@@ -290,21 +290,42 @@ class BalatroAgent:
 
         summary = profile.summary if profile.has_synergies else ""
         notes = self._resource_notes(profile)
+        blind_effect = self._active_blind_effect(raw_g)
         play_context = self._context(
             hand_brief(
                 state.ante, state.blind_name, needed, state.hands_left, state.discards_left,
-                state.hand, jokers, plays, summary, notes,
+                state.hand, jokers, plays, summary, notes, blind_effect,
             ),
             raw_g,
         )
         discard_context = self._context(
             discard_brief(
                 state.ante, state.blind_name, needed, state.hands_left, state.discards_left,
-                state.hand, discards, summary, notes,
+                state.hand, discards, summary, notes, blind_effect,
             ),
             raw_g,
         )
         return HandFacts(needed, plays, discards, jokers, profile, play_context, discard_context)
+
+    @staticmethod
+    def _active_blind_effect(raw_g: Optional[Dict[str, Any]]) -> str:
+        """The rule the boss blind is imposing this round.
+
+        Boss rules change what the cards are worth -- a debuffed suit scores
+        nothing, a smaller hand size changes what can be built. Without this the
+        model is being shown ante-1 arithmetic during a boss fight.
+        """
+        blinds = (raw_g or {}).get("blinds")
+        if not isinstance(blinds, dict):
+            return ""
+        for key in ("boss", "big", "small"):
+            info = blinds.get(key)
+            if not isinstance(info, dict):
+                continue
+            status = str(info.get("status", "")).upper()
+            if status in ("SELECT", "SELECTING", "CURRENT", "ACTIVE") or info.get("selected"):
+                return str(info.get("effect") or "").strip()
+        return ""
 
     @staticmethod
     def _resource_notes(profile: SynergyProfile) -> List[str]:

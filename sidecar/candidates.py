@@ -120,7 +120,9 @@ def enumerate_play_cores(hand: Sequence[Card]) -> List[PlayOption]:
     (the same five-card flush but with a lower card), only the higher-chip version
     is enumerated. That is card-game dominance, not a strategic preference.
     """
-    hand = list(hand)
+    # A face-down card has no known rank or suit, so it cannot be part of a hand
+    # the model is asked to choose. It stays available as filler.
+    hand = [c for c in hand if not getattr(c, "face_down", False)]
     if not hand:
         return []
 
@@ -246,7 +248,7 @@ def enumerate_discard_plans(
     which is what a pattern-matching model can actually reason about -- far more
     than a list of card indices.
     """
-    hand = list(hand)
+    hand = [c for c in hand if not getattr(c, "face_down", False)]
     if len(hand) < 2:
         return []
 
