@@ -221,7 +221,7 @@ def cmd_bench_finish(args, client):
     raw_g = client.get_gamestate() or {}
     ante = raw_g.get("ante_num", 1)
     round_num = raw_g.get("round_num", 1)
-    won = bool(raw_g.get("won", False))
+    won = bool(raw_g.get("won", False)) or ante > 8 or round_num >= 24
     chips = raw_g.get("round", {}).get("chips", 0)
 
     start_time = time.time()
@@ -255,13 +255,14 @@ def cmd_bench_finish(args, client):
 
     out_file = ROOT_DIR / "benchmark_results.json"
     out_file.write_text(json.dumps(result, indent=2))
+    won_style = "green" if won else "red"
     console.print(Panel(
         f"[bold green]BalatroBench Official Results Saved![/bold green]\n"
         f"• Seed: [yellow]{seed}[/yellow]\n"
         f"• Ante Reached: [bold yellow]{ante}[/bold yellow] / 8\n"
         f"• Rounds Reached: [bold magenta]{round_num}[/bold magenta] / 24\n"
         f"• Final Chips: [bold cyan]{chips}[/bold cyan]\n"
-        f"• Won: [bold {'green' if won else 'red'}]{won}[/bold]\n"
+        f"• Won: [bold {won_style}]{won}[/bold {won_style}]\n"
         f"• Duration: {duration}s\n"
         f"Saved to: [dim]{out_file}[/dim]",
         title="🏆 BalatroBench Scorecard",
@@ -299,6 +300,7 @@ def main():
 
     p_pack = subparsers.add_parser("pick-pack", help="Pick card from booster pack")
     p_pack.add_argument("index", type=int, help="Pack card index")
+    p_pack.add_argument("targets", type=int, nargs="*", help="Optional target hand card indices")
     subparsers.add_parser("skip-pack", help="Skip booster pack")
 
     p_bench = subparsers.add_parser("bench-start", help="Start official BalatroBench run")
@@ -351,7 +353,8 @@ def main():
     elif args.command == "rearrange":
         client.rearrange_jokers(args.order)
     elif args.command == "pick-pack":
-        client.select_pack_card(card_idx=args.index)
+        targets = args.targets if args.targets else None
+        client.select_pack_card(card_idx=args.index, targets=targets)
     elif args.command == "skip-pack":
         client.select_pack_card(skip=True)
 
