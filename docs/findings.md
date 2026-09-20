@@ -162,6 +162,49 @@ zero-shot Laya is clearly above random, roughly level with always taking the
 first option, and far below what the labels themselves support. The tree helps
 it (1.04 vs 0.75) in the same direction it helps the probe.
 
+### What the model can and cannot answer
+
+`sidecar/qbench.py` asks decision points generated from real dealt hands, in the
+tree's own format, where the simulator knows the right answer. Each one is asked
+twice: once with the real option text, and once with every number and verdict
+stripped out. 360 items, 30 hands, `typed-decisions` checkpoint:
+
+| question | variant | accuracy | chance | same answer |
+| --- | --- | ---: | ---: | ---: |
+| which of two hands scores more | labelled | **100%** | 50% | 10% |
+| which of two hands scores more | bare | **100%** | 50% | 10% |
+| which of all of them scores most | labelled | **93%** | 25% | 10% |
+| which of all of them scores most | bare | 50% | 25% | 50% |
+| can any of them beat the blind | labelled | 47% | 50% | 63% |
+| can any of them beat the blind | bare | 50% | 50% | 97% |
+| play or dig | labelled | 50% | 50% | **100%** |
+| play or dig | bare | 50% | 50% | **100%** |
+
+Read the last column first. On the two yes/no questions the model gives the same
+answer to every board -- 100% of the time for play-or-dig. Its accuracy there is
+not "wrong", it is "not answering". Asking them as a two-option choice instead of
+a native yes/no changes nothing.
+
+And then the top two rows. Asked which of two hands is bigger it is right every
+single time, **including with every number and verdict deleted** -- it knows a
+Flush beats a Pair from its language prior, without being told what either is
+worth. With the full list it is right 93% of the time with labels and at chance
+without, so the labels are doing real work once the comparison gets harder.
+
+The split is clean and it is not about arithmetic being hard to *read*: in
+"can any of them beat the blind" both numbers are right there in the text. It is
+about the kind of question. **Relations between poker hands: excellent.
+Quantities: nothing.** That is what a System 1 pattern matcher with a language
+prior looks like from the outside, and it is exactly the distinction the tree now
+builds on -- the play-or-dig call is asked as "which poker hand do you want to
+score with", not as "is this enough".
+
+Moving to that shape took two attempts. Listing hand *types* with one
+representative each made things worse than the old two-question tree (0.75
+against 1.04 mean rounds over 24 seeds), because a type with a stand-in is not
+the comparison the model is good at. Listing the hands themselves gives **1.17**,
+the best measured so far.
+
 ### What the live game showed: it skips almost every blind
 
 The offline harness has no blind-selection decision -- it plays every blind in
@@ -186,6 +229,26 @@ asks its yes/no items both ways on identical boards, which is what the
 `same answer` column in its output is for: a model that answers the same thing
 whatever the board scores 100% there, and its accuracy is then only the base rate
 of that answer.
+
+### Boss blinds: the facts were simply wrong
+
+The offline harness plays ordinary blinds, so two bugs survived until the live
+bench reached bosses.
+
+A face-down card -- The Mark, The Wheel, The House, The Fish -- reports no rank
+and no suit, and `parse_state` defaulted it to the 2 of Spades. Every hand the
+model was offered on those blinds could contain a card that does not exist.
+Face-down cards are now excluded from every enumerated hand and discard plan,
+shown as `??`, and counted in the brief.
+
+A debuffed card -- The Club, The Plant -- counted its full chips. It now counts
+none while still forming the hand type, which is what the game does.
+
+And the boss's own rule, sitting in the gamestate unused, is now the first line
+of the brief.
+
+None of this is strategy; all of it is the difference between describing the
+board and describing a different board.
 
 ### Node shape: one choice, or a poll of yes/no questions?
 
