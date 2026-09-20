@@ -56,7 +56,7 @@ class BalatroLayaRunner:
             return
 
         state = self.client.parse_state(raw_g)
-        action: AgentAction = self.agent.decide_hand_action(state)
+        action: AgentAction = self.agent.decide_hand_action(state, raw_g=raw_g)
 
         table = Table(title=f"🃏 Hand in Play (Ante {state.ante} | {state.blind_name} | Score: {state.current_chips}/{state.target_chips})", show_header=True)
         table.add_column("Idx", justify="center", style="cyan")
@@ -121,7 +121,7 @@ class BalatroLayaRunner:
                 table.add_row(str(idx), it["name"], f"${it['cost']}")
             console.print(table)
 
-        decision = self.agent.decide_shop_action(state, shop_items, max_jokers=max_jokers)
+        decision = self.agent.decide_shop_action(state, shop_items, max_jokers=max_jokers, raw_g=raw_g)
         if decision is not None:
             one_based_idx, reasoning = decision
             zero_based_idx = one_based_idx - 1

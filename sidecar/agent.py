@@ -5,6 +5,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 
 from sidecar.poker_eval import Card, PokerEvaluator, EvaluatedHand
+from sidecar.strategy import StrategyManager
 
 @dataclass
 class BalatroGameState:
@@ -73,29 +74,31 @@ def classify_joker(name: str) -> int:
     return 1
 
 class BalatroAgent:
-    """Autonomous Balatro agent using living strategy rules and Laya neural decisions."""
+    """Autonomous Balatro agent using coder/balatrollm official strategies and Laya neural decisions."""
 
-    def __init__(self, rules_path: str = "rules/balatro-strategy.md"):
+    def __init__(self, rules_path: str = "rules/balatro-strategy.md", strategy_name: str = "default"):
         self.rules_path = Path(rules_path)
         self.rules_content = self.rules_path.read_text(encoding="utf-8") if self.rules_path.exists() else ""
+        self.strategy_name = strategy_name
+        self.sm = StrategyManager(strategy_name)
         self.agent = laya.load("convaiinnovations/laya")
 
-    def decide_hand_action(self, state: BalatroGameState) -> AgentAction:
+    def decide_hand_action(self, state: BalatroGameState, raw_g: Optional[Dict[str, Any]] = None) -> AgentAction:
         """Decides whether to play the best available hand or discard cards."""
         best_hands = PokerEvaluator.find_best_playable_hands(state.hand, top_k=2)
         top_hand = best_hands[0]
         needed_chips = max(0, state.target_chips - state.current_chips)
 
-        # Rule 1: RULE_INSTANT_WIN
+        # Rule 1: Instant Win if hand beats blind
         if top_hand.total_score >= needed_chips:
             return AgentAction(
                 action_type="PLAY",
                 cards=top_hand.cards,
-                reasoning=f"RULE_INSTANT_WIN: '{top_hand.hand_type}' yields {top_hand.total_score} pts, beating needed {needed_chips} pts.",
+                reasoning=f"Winning play: '{top_hand.hand_type}' yields {top_hand.total_score} pts, beating needed {needed_chips} pts.",
                 confidence=1.0
             )
 
-        # Rule 2: RULE_FLUSH_DIG
+        # Rule 2: Flush Digging
         if state.discards_left > 0:
             suit_counts = Counter(c.suit for c in state.hand)
             most_common_suit, count = suit_counts.most_common(1)[0]
@@ -104,28 +107,28 @@ class BalatroAgent:
                 return AgentAction(
                     action_type="DISCARD",
                     cards=discards,
-                    reasoning=f"RULE_FLUSH_DIG: Holding {count} {most_common_suit}. Discarding {len(discards)} off-suit cards to dig for Flush.",
+                    reasoning=f"Flush Digging: Holding {count} {most_common_suit}. Discarding {len(discards)} off-suit cards to dig for Flush.",
                     confidence=0.98
                 )
 
-        # Rule 3: Discard fallback with Laya
+        # Rule 3: LLM Decision using official BalatroLLM GameState representation
         if state.discards_left > 0 and state.hands_left > 1:
             recommended_discards = PokerEvaluator.recommend_discards(state.hand)
+            
+            # Use rendered official gamestate if available
+            gamestate_repr = self.sm.render_gamestate(raw_g) if raw_g else f"Ante {state.ante}, Hands: {state.hands_left}, Discards: {state.discards_left}, Needed: {needed_chips}"
+            
             laya_state = {
-                "rules": "RULE_HAND_PRIORITY: Conserve hands; discard low unpaired cards if far from blind chips.",
-                "ante": state.ante,
-                "hands_left": state.hands_left,
-                "discards_left": state.discards_left,
+                "gamestate": gamestate_repr[:1500],
+                "playable_hand": f"{top_hand.hand_type} ({top_hand.total_score} pts)",
                 "needed_chips": needed_chips,
-                "playable_hand_type": top_hand.hand_type,
-                "playable_hand_score": top_hand.total_score,
-                "active_jokers": state.jokers
+                "discards_left": state.discards_left
             }
 
             questions = {
                 "hand_strategy": {
                     "type": "choice",
-                    "instructions": "Determine if current hand score justifies playing or if player should discard based on rules.",
+                    "instructions": "Determine if current hand score justifies playing or if player should discard based on official strategy.",
                     "criteria": {
                         "play": "The hand score is substantial or remaining hands are critical.",
                         "discard": "The hand score is too low compared to target chips and discards are plentiful."
@@ -142,13 +145,13 @@ class BalatroAgent:
                     return AgentAction(
                         action_type="DISCARD",
                         cards=recommended_discards,
-                        reasoning=f"Laya Neural Decision: Discarding {len(recommended_discards)} cards to dig for stronger hand.",
+                        reasoning=f"Neural Decision: Discarding {len(recommended_discards)} cards to dig for higher score.",
                         confidence=conf
                     )
             except Exception:
                 pass
 
-        # Default fallback: Play the best hand
+        # Fallback: Play best hand
         return AgentAction(
             action_type="PLAY",
             cards=top_hand.cards,
@@ -158,8 +161,7 @@ class BalatroAgent:
 
     def decide_joker_order(self, current_jokers: List[Dict[str, Any]]) -> Optional[List[int]]:
         """
-        Implements RULE_JOKER_ORDER:
-        Arrange [+Chips] -> [+Flat Mult] -> [+Scaling Mult] -> [X-Mult].
+        Orders Jokers: [+Chips] -> [+Flat Mult] -> [+Scaling Mult] -> [X-Mult].
         """
         if len(current_jokers) <= 1:
             return None
@@ -177,10 +179,6 @@ class BalatroAgent:
         return sorted_indices
 
     def decide_consumable_action(self, consumables: List[Dict[str, Any]]) -> Optional[Tuple[int, str]]:
-        """
-        Implements RULE_USE_PLANET and RULE_USE_TAROT:
-        Returns (0-based index, reasoning) if a consumable should be used immediately.
-        """
         if not consumables:
             return None
 
@@ -189,38 +187,34 @@ class BalatroAgent:
             name = (c.get("label") or c.get("key", "")).lower()
 
             if set_type == "PLANET" or any(p in name for p in ["jupiter", "pluto", "mars", "saturn", "earth", "mercury", "uranus", "venus", "neptune"]):
-                return (idx, f"RULE_USE_PLANET: Using planet card '{c.get('label') or name}' to level up poker hands.")
+                return (idx, f"Using planet card '{c.get('label') or name}' to level up poker hands.")
 
             if "hermit" in name:
-                return (idx, "RULE_USE_TAROT: Using The Hermit for instant economy boost.")
+                return (idx, "Using The Hermit for instant economy boost.")
 
             if "temperance" in name:
-                return (idx, "RULE_USE_TAROT: Using Temperance for instant cash boost.")
+                return (idx, "Using Temperance for instant cash boost.")
 
             if "fool" in name:
-                return (idx, "RULE_USE_TAROT: Using The Fool.")
+                return (idx, "Using The Fool to duplicate last card.")
 
         return None
 
     def decide_pack_card(self, pack_cards: List[Dict[str, Any]], hand: Optional[List[Card]] = None, jokers_count: int = 0, max_jokers: int = 5) -> Optional[Tuple[int, Optional[List[int]], str]]:
-        """
-        Evaluates opened booster pack cards and selects the best card with necessary target cards.
-        Returns (0-based card_idx, optional target_indices, reasoning) or None.
-        """
         if not pack_cards:
             return None
 
         hand_cards = hand or []
         n_hand = len(hand_cards)
 
-        # 1. Look for Planet cards (never require targets, always beneficial)
+        # 1. Planet cards (no targets, permanent scaling)
         for idx, c in enumerate(pack_cards):
             name = (c.get("label") or c.get("key", "")).lower()
             set_type = c.get("set", "").upper()
             if set_type == "PLANET" or any(p in name for p in ["jupiter", "pluto", "mars", "saturn", "earth", "uranus", "venus", "neptune"]):
                 return (idx, None, f"Selected planet card '{c.get('label', name)}' for permanent hand level up.")
 
-        # 2. Look for instant money / utility Tarots (NO TARGETS NEEDED)
+        # 2. Economy and Instant Tarots (no targets)
         for idx, c in enumerate(pack_cards):
             name = (c.get("label") or c.get("key", "")).lower()
             if "temperance" in name:
@@ -234,53 +228,42 @@ class BalatroAgent:
             if "fool" in name:
                 return (idx, None, "Selected 'The Fool' to duplicate last consumable.")
 
-        # 3. Look for target-requiring Tarots if we have enough cards in hand
+        # 3. Target-requiring Tarots if sufficient hand cards exist
         if n_hand >= 2:
-            # Sorted hand indices: worst (lowest chip) to best (highest chip)
             hand_sorted_by_val = sorted(range(n_hand), key=lambda i: hand_cards[i].value)
             worst_indices = hand_sorted_by_val[:2]
             best_indices = hand_sorted_by_val[-2:]
 
             for idx, c in enumerate(pack_cards):
                 name = (c.get("label") or c.get("key", "")).lower()
-                
-                # Death: transforms left card into copy of right card -> [worst_idx, best_idx]
                 if "death" in name:
                     return (idx, [worst_indices[0], best_indices[-1]], f"Selected 'Death': transforming card #{worst_indices[0]} into copy of #{best_indices[-1]}.")
-
-                # The Hanged Man: destroys 2 selected cards
                 if "hanged man" in name:
                     return (idx, worst_indices, f"Selected 'The Hanged Man': destroying low cards {worst_indices} to thin deck.")
-
-                # Suit converters: 3 off-suit cards
                 if any(s in name for s in ["the sun", "the moon", "the star", "the world"]):
                     suit_targets = worst_indices[:min(3, n_hand)]
                     return (idx, suit_targets, f"Selected suit converter '{c.get('label', name)}'.")
-
-                # Enhancements (Empress, Hierophant, Chariot, Magician)
                 if any(e in name for e in ["empress", "hierophant", "chariot", "magician", "lovers", "devil"]):
                     enhance_targets = [best_indices[-1]]
                     return (idx, enhance_targets, f"Selected enhancement '{c.get('label', name)}' on top card #{best_indices[-1]}.")
 
-        # 4. Check for Jokers (Buffoon pack)
+        # 4. Buffoon pack Jokers
         for idx, c in enumerate(pack_cards):
             set_type = c.get("set", "").upper()
             if set_type == "JOKER" or "joker" in c.get("key", "").lower():
                 name = c.get("label") or c.get("key", "")
                 return (idx, None, f"Selected Joker '{name}' from Buffoon pack.")
 
-        # 5. Fallback: Find ANY card that does NOT require hand targets
-        # Cards that require targets: death, hanged man, sun, moon, star, world, empress, hierophant, chariot, magician, lovers, tower, devil, strength, justice
+        # 5. Fallback safe cards
         TARGET_REQUIRING = ["death", "hanged man", "sun", "moon", "star", "world", "empress", "hierophant", "chariot", "magician", "lovers", "tower", "devil", "strength", "justice"]
         for idx, c in enumerate(pack_cards):
             name = (c.get("label") or c.get("key", "")).lower()
             if not any(t in name for t in TARGET_REQUIRING):
                 return (idx, None, f"Selected safe card '{c.get('label', name)}' requiring no hand targets.")
 
-        # If everything requires targets and we don't have enough hand cards, return None to skip
         return None
 
-    def decide_shop_action(self, state: BalatroGameState, shop_items: List[Dict[str, Any]], max_jokers: int = 5) -> Optional[Tuple[int, str]]:
+    def decide_shop_action(self, state: BalatroGameState, shop_items: List[Dict[str, Any]], max_jokers: int = 5, raw_g: Optional[Dict[str, Any]] = None) -> Optional[Tuple[int, str]]:
         if not shop_items or state.money < 3:
             return None
 
@@ -310,25 +293,24 @@ class BalatroAgent:
                 if state.ante <= 3 or jokers_count < 2:
                     is_scoring = any(k in name for k in mult_keywords) or jokers_count == 0
                     if is_scoring:
-                        return (one_based_idx, f"RULE_SHOP_PRIORITY: Buying '{item.get('name')}' (${cost}) to establish Mult/Chip foundation.")
+                        return (one_based_idx, f"Shop Priority: Buying '{item.get('name')}' (${cost}) to establish Mult/Chip foundation.")
                 else:
                     is_elite = any(k in name for k in scaling_keywords)
                     if is_elite or (state.money - cost >= 20):
-                        return (one_based_idx, f"RULE_SHOP_PRIORITY: Acquiring scaling/utility Joker '{item.get('name')}' (${cost}).")
+                        return (one_based_idx, f"Shop Priority: Acquiring scaling/utility Joker '{item.get('name')}' (${cost}).")
 
         if affordable and can_hold_joker and state.money >= 6:
+            gamestate_repr = self.sm.render_gamestate(raw_g) if raw_g else f"Ante {state.ante}, Money: ${state.money}, Jokers: {state.jokers}"
             cand_summary = [f"#{idx}: {item.get('name')} (${cost})" for idx, item, cost in affordable]
+            
             laya_state = {
-                "rules": "RULE_INTEREST_RESERVE: Maintain $25 for max interest unless buying essential scoring upgrades.",
-                "ante": state.ante,
-                "money": state.money,
-                "jokers": state.jokers,
+                "gamestate": gamestate_repr[:1500],
                 "available_items": cand_summary
             }
             questions = {
                 "shop_decision": {
                     "type": "choice",
-                    "instructions": "Choose whether to buy an available card or save money for interest based on RULE_INTEREST_RESERVE.",
+                    "instructions": "Choose whether to buy an available card or save money for interest based on official strategy.",
                     "criteria": {
                         "buy_first": "Buy the first available item to strengthen deck.",
                         "save": "Save money towards $25 interest threshold."
@@ -340,7 +322,7 @@ class BalatroAgent:
                 choice = res["answers"]["shop_decision"]["choice"]
                 if choice == "buy_first":
                     first_idx, first_item, first_cost = affordable[0]
-                    return (first_idx, f"Laya Decision: Purchasing '{first_item.get('name')}' (${first_cost}) based on rulebook criteria.")
+                    return (first_idx, f"Strategy Decision: Purchasing '{first_item.get('name')}' (${first_cost}).")
             except Exception:
                 pass
 
