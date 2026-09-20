@@ -62,51 +62,6 @@ def find_weakest_joker_index(jokers: List[Dict[str, Any]]) -> Optional[int]:
         return idx
     return 0
 
-
-
-def get_tarot_targets(name: str, hand: List[Any]) -> Optional[List[int]]:
-    """Calculates valid target card indices in hand for Tarot cards."""
-    if not hand:
-        return None
-    name_l = name.lower()
-
-    # The Sun (convert up to 3 cards to Hearts)
-    if "sun" in name_l:
-        non_hearts = [i for i, c in enumerate(hand) if getattr(c, "suit", "") != "H"]
-        return non_hearts[:3] if non_hearts else [0]
-
-    # The Star / Moon / World (Diamonds, Clubs, Spades)
-    if any(k in name_l for k in ["star", "moon", "world"]):
-        return [0]
-
-    # The Hanged Man (destroys up to 2 cards) - destroy lowest non-hearts
-    if "hanged" in name_l:
-        non_hearts = [i for i, c in enumerate(hand) if getattr(c, "suit", "") != "H"]
-        return non_hearts[:2] if non_hearts else list(range(min(2, len(hand))))
-
-    # The Lovers (converts 1 card to Wild)
-    if "lovers" in name_l:
-        non_hearts = [i for i, c in enumerate(hand) if getattr(c, "suit", "") != "H"]
-        return [non_hearts[0]] if non_hearts else [0]
-
-    # Death (left card becomes right card)
-    if "death" in name_l:
-        return [0, 1] if len(hand) >= 2 else None
-
-    # Strength (increase rank of up to 2 cards)
-    if "strength" in name_l:
-        return list(range(min(2, len(hand))))
-
-    # Enhancements up to 2 cards (Empress, Hierophant, Magician)
-    if any(k in name_l for k in ["empress", "hierophant", "magician"]):
-        return list(range(min(2, len(hand))))
-
-    # Enhancements for 1 card (Chariot, Justice, Tower, Devil)
-    if any(k in name_l for k in ["chariot", "justice", "tower", "devil"]):
-        return [0]
-
-    return None
-
 class BalatroAgent:
     """Autonomous Balatro agent where Laya makes 100% of game decisions."""
 
@@ -450,6 +405,58 @@ class BalatroAgent:
 
         return (0, None, f"Selected '{pack_cards[0].get('label', 'card')}'")
 
+    def decide_tarot_targets(
+        self,
+        tarot_name: str,
+        hand: Optional[List[Any]] = None,
+        raw_g: Optional[Dict[str, Any]] = None,
+    ) -> Optional[List[int]]:
+        """Queries Laya directly to choose which card(s) in hand to target with a Tarot card."""
+        if not hand:
+            return None
+
+        t_name_l = tarot_name.lower()
+        # Tarots that do not target hand cards
+        if any(k in t_name_l for k in ["wheel of fortune", "fool", "hermit", "temperance", "judgement"]):
+            return None
+
+        candidates = {}
+        for idx, c in enumerate(hand):
+            r = getattr(c, "rank", "?")
+            s = getattr(c, "suit", "?")
+            candidates[f"card_{idx}"] = f"Target {r} of {s} (index {idx})"
+
+        if not candidates:
+            return None
+
+        gamestate_text = self._render_state(raw_g)
+        questions = {
+            "tarot_target": {
+                "type": "choice",
+                "instructions": (
+                    f"You are applying Tarot card '{tarot_name}'. "
+                    "Select the single best card in hand to enhance, convert, or destroy based on your strategy."
+                ),
+                "criteria": candidates,
+            }
+        }
+
+        try:
+            res = self.agent.predict(gamestate_text[:2000], questions)
+            choice = res["answers"]["tarot_target"]["choice"]
+            if choice.startswith("card_"):
+                chosen_idx = int(choice.split("_")[1])
+                max_targets = 3 if any(k in t_name_l for k in ["sun", "star", "moon", "world"]) else (2 if any(k in t_name_l for k in ["empress", "hierophant", "magician", "hanged", "strength", "death"]) else 1)
+                targets = [chosen_idx]
+                for i in range(len(hand)):
+                    if i != chosen_idx and len(targets) < max_targets:
+                        targets.append(i)
+                return targets
+        except Exception:
+            pass
+
+        return [0]
+
     def decide_consumable_action(
         self,
         consumables: List[Dict[str, Any]],
@@ -483,7 +490,7 @@ class BalatroAgent:
             if choice.startswith("use_"):
                 idx = int(choice.split("_")[1])
                 name = consumables[idx].get("label") or consumables[idx].get("key", "")
-                targets = get_tarot_targets(name, hand or [])
+                targets = self.decide_tarot_targets(name, hand=hand, raw_g=raw_g)
                 return (idx, targets, f"Laya Decision: {candidates[choice]} (targets={targets})")
         except Exception:
             pass
@@ -497,13 +504,19 @@ class BalatroAgent:
 
         indexed = []
         for i, j in enumerate(current_jokers):
+            val_obj = j.get("value", {}) if isinstance(j, dict) else {}
+            effect = (val_obj.get("effect") or "").lower() if isinstance(val_obj, dict) else ""
             name = (j.get("label") or j.get("key", "")).lower()
-            if any(k in name for k in ["cavendish", "constellation", "card sharp", "blueprint", "brainstorm", "duo", "trio", "family", "baron"]):
-                cat = 2  # xMult at end
-            elif any(k in name for k in ["joker", "half", "gros michel", "popcorn", "mystic", "even", "odd", "abstract"]):
-                cat = 1  # +Mult in middle
+
+            # xMult goes to rightmost
+            if ("x" in effect or "x mult" in effect or "xmult" in effect) or any(k in name for k in ["cavendish", "constellation", "card sharp", "blueprint", "brainstorm", "duo", "trio", "family", "baron"]):
+                cat = 2
+            # Flat mult goes in middle
+            elif ("mult" in effect or "+mult" in effect) or any(k in name for k in ["joker", "half", "gros michel", "popcorn", "mystic", "even", "odd", "abstract", "lusty", "droll"]):
+                cat = 1
+            # Chips and utility go leftmost
             else:
-                cat = 0  # +Chips / utility at front
+                cat = 0
             indexed.append((cat, i))
 
         sorted_indices = [idx for cat, idx in sorted(indexed, key=lambda x: x[0])]
