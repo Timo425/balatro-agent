@@ -270,6 +270,65 @@ of the brief.
 None of this is strategy; all of it is the difference between describing the
 board and describing a different board.
 
+### Does the tree actually help the model, or only the probe?
+
+Both, and it helps the model more. Same code, same 24 seeds, no jokers:
+
+| | tree | flat | gain |
+| --- | ---: | ---: | ---: |
+| `laya` | **1.17** | 0.71 | **+65%** |
+| `label` probe | 2.28 | 1.62 | +41% |
+
+The probe reads a wide option list as accurately as a short one, so flat costs it
+only the discard plans getting buried. The model loses accuracy as options
+multiply, so it gains from the split twice over.
+
+### Where the ceiling is, and why a bigger tree does not move it
+
+Worth being blunt about, because "make the tree better" has a limit that is
+already measured.
+
+The `label` probe never miscalculates and never misreads. In the shop-less
+simulator it averages 2.28 rounds with no jokers and ~9.8 with three good ones --
+Ante 3 or 4. That is the ceiling of *reading these facts perfectly*, and Ante 8
+is well above it. What is missing at that point is not better reading: it is
+choosing which jokers to buy, when to level hands and when to hold money, across
+24 rounds that interact. Nothing in this design looks further ahead than the
+decision in front of it.
+
+Nor does throughput help. Laya answers in ~33 ms on a GPU, so thousands of
+decisions per run are affordable -- but there is no search to spend them on. Each
+call is independent and the model has no notion of lookahead, so asking the same
+question a thousand times returns the same answer a thousand times. A search
+*would* pay if there were a reliable evaluator to guide it, and qbench says there
+is not one for the questions that matter.
+
+The tempting move from here is to encode the plan in Python -- "by Ante 3 you
+want an X-Mult joker and level-5 hands" -- and let the model tick off each step.
+That would raise the score and destroy the point: the model would be rubber-
+stamping a strategy Python wrote, and the run would measure Python.
+
+`--compare` exists to catch exactly that. It reports the policy's distance from
+`random` alongside its score; if a change keeps the score up while that gap
+collapses, the tree has started playing.
+
+### Where this model would actually pay: routing, not playing
+
+The one class of question the model answers well -- which hand scores more -- is
+also the most frequent decision in a run. Most turns are hand decisions; blinds,
+shops and packs are a handful each.
+
+So the useful architecture is not Laya instead of an LLM, nor a Laya tool that
+makes an LLM smarter. There is no pruning niche in Balatro: eight cards make 56
+five-card hands, and Python scores all of them exactly in under a millisecond, so
+a cheap approximate scorer has nothing to approximate. And the judgements an LLM
+would want help with are the quantity judgements this model cannot make.
+
+What it can do is absorb the volume. `--backend hybrid` sends the hand choice to
+Laya when it answers with conviction, and everything else -- and every hesitant
+answer -- to the LLM. The score is the LLM's; the cost is much lower, by roughly
+the share Laya keeps.
+
 ### Node shape: one choice, or a poll of yes/no questions?
 
 `noul` is Laya's strongest primitive (0.857 against 0.733 for `choice` on its own
