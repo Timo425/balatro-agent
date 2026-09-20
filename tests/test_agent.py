@@ -62,9 +62,9 @@ class TestBalatroAgent(unittest.TestCase):
 
     def test_rule_joker_order(self):
         jokers = [
-            {"label": "Cavendish", "key": "j_cavendish"},
-            {"label": "Banner", "key": "j_banner"},
-            {"label": "Half Joker", "key": "j_half"}
+            {"label": "Cavendish", "key": "j_cavendish", "value": {"effect": "X3 Mult, 1 in 1000 chance to go extinct"}},
+            {"label": "Banner", "key": "j_banner", "value": {"effect": "+40 Chips for each remaining discard"}},
+            {"label": "Half Joker", "key": "j_half", "value": {"effect": "+20 Mult if played hand contains 3 or fewer cards"}}
         ]
         new_order = self.agent.decide_joker_order(jokers)
         self.assertEqual(new_order, [1, 2, 0])

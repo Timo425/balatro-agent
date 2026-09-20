@@ -6,6 +6,7 @@ in-game scores and executing Laya's decisions via JSON-RPC.
 """
 
 import itertools
+import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -410,15 +411,31 @@ class BalatroAgent:
         tarot_name: str,
         hand: Optional[List[Any]] = None,
         raw_g: Optional[Dict[str, Any]] = None,
+        effect: str = "",
     ) -> Optional[List[int]]:
-        """Queries Laya directly to choose which card(s) in hand to target with a Tarot card."""
+        """Queries Laya directly to choose which card(s) in hand to target with a Tarot card.
+        Determines target requirements dynamically from card effect text without hardcoded name lists.
+        """
         if not hand:
             return None
 
-        t_name_l = tarot_name.lower()
-        # Tarots that do not target hand cards
-        if any(k in t_name_l for k in ["wheel of fortune", "fool", "hermit", "temperance", "judgement"]):
-            return None
+        eff_lower = (effect or "").lower()
+        t_name_lower = tarot_name.lower()
+
+        # Check if this card targets hand cards based on effect text or card description
+        # In Balatro, targeting cards state "selected card" or "selected cards"
+        if eff_lower:
+            if "selected card" not in eff_lower:
+                return None
+            target_match = re.search(r"(\d+)\s+selected\s+card", eff_lower)
+            max_targets = int(target_match.group(1)) if target_match else 1
+        else:
+            # If no effect text was provided, detect self-targeting tarots (money/joker tarots)
+            # which never target playing cards in hand
+            non_targeting_keywords = ["money", "cash", "joker", "copy", "edition"]
+            if any(k in t_name_lower for k in non_targeting_keywords):
+                return None
+            max_targets = 1
 
         candidates = {}
         for idx, c in enumerate(hand):
@@ -446,12 +463,7 @@ class BalatroAgent:
             choice = res["answers"]["tarot_target"]["choice"]
             if choice.startswith("card_"):
                 chosen_idx = int(choice.split("_")[1])
-                max_targets = 3 if any(k in t_name_l for k in ["sun", "star", "moon", "world"]) else (2 if any(k in t_name_l for k in ["empress", "hierophant", "magician", "hanged", "strength", "death"]) else 1)
-                targets = [chosen_idx]
-                for i in range(len(hand)):
-                    if i != chosen_idx and len(targets) < max_targets:
-                        targets.append(i)
-                return targets
+                return [chosen_idx]
         except Exception:
             pass
 
@@ -469,9 +481,12 @@ class BalatroAgent:
 
         candidates = {}
         for idx, c in enumerate(consumables):
-            name = c.get("label") or c.get("key", f"Item #{idx}")
+            name = c.get("label") or c.get("key", f"Consumable #{idx}")
             set_type = c.get("set", "CONSUMABLE")
-            candidates[f"use_{idx}"] = f"Use {set_type} '{name}' immediately to level up hand or gain cash"
+            val_obj = c.get("value", {}) if isinstance(c, dict) else {}
+            eff = val_obj.get("effect", "") if isinstance(val_obj, dict) else ""
+            eff_desc = f" ({eff})" if eff else ""
+            candidates[f"use_{idx}"] = f"Use {set_type} '{name}'{eff_desc} immediately to level up hand or gain bonus"
 
         candidates["keep_all"] = "Keep all consumables in inventory for later"
 
@@ -490,36 +505,80 @@ class BalatroAgent:
             if choice.startswith("use_"):
                 idx = int(choice.split("_")[1])
                 name = consumables[idx].get("label") or consumables[idx].get("key", "")
-                targets = self.decide_tarot_targets(name, hand=hand, raw_g=raw_g)
+                val_obj = consumables[idx].get("value", {}) if isinstance(consumables[idx], dict) else {}
+                eff = val_obj.get("effect", "") if isinstance(val_obj, dict) else ""
+                targets = self.decide_tarot_targets(name, hand=hand, raw_g=raw_g, effect=eff)
                 return (idx, targets, f"Laya Decision: {candidates[choice]} (targets={targets})")
         except Exception:
             pass
 
         return None
 
-    def decide_joker_order(self, current_jokers: List[Dict[str, Any]]) -> Optional[List[int]]:
-        """Positions utility/chips (+Chips) and flat Mult (+Mult) before multiplicative Mult (xMult)."""
+    def decide_joker_order(self, current_jokers: List[Dict[str, Any]], raw_g: Optional[Dict[str, Any]] = None) -> Optional[List[int]]:
+        """Presents joker reordering options directly to Laya to decide the optimal trigger sequence.
+        Evaluates joker effects dynamically (phase 0: Chips/Utility, phase 1: Flat Mult, phase 2: X-Mult)
+        without any hardcoded joker names.
+        """
         if len(current_jokers) <= 1:
             return None
 
         indexed = []
         for i, j in enumerate(current_jokers):
             val_obj = j.get("value", {}) if isinstance(j, dict) else {}
-            effect = (val_obj.get("effect") or "").lower() if isinstance(val_obj, dict) else ""
-            name = (j.get("label") or j.get("key", "")).lower()
+            effect = (val_obj.get("effect") or j.get("effect") or "").lower() if isinstance(val_obj, dict) else ""
 
-            # xMult goes to rightmost
-            if ("x" in effect or "x mult" in effect or "xmult" in effect) or any(k in name for k in ["cavendish", "constellation", "card sharp", "blueprint", "brainstorm", "duo", "trio", "family", "baron"]):
+            # Classify scoring phase purely from effect mechanics:
+            # Multiplicative mult (X-Mult): "X3", "x1.5", "X Mult" -> triggers last
+            if re.search(r"\bx\s*\d+(\.\d+)?|\bx\s*mult\b|\bxmult\b", effect):
                 cat = 2
-            # Flat mult goes in middle
-            elif ("mult" in effect or "+mult" in effect) or any(k in name for k in ["joker", "half", "gros michel", "popcorn", "mystic", "even", "odd", "abstract", "lusty", "droll"]):
+            # Flat mult (+Mult): "+10 Mult", "gives +3 Mult" -> triggers middle
+            elif re.search(r"\b\+\s*\d+\s*mult\b|\bmult\b", effect):
                 cat = 1
-            # Chips and utility go leftmost
+            # Chips or utility -> triggers first
             else:
                 cat = 0
             indexed.append((cat, i))
 
-        sorted_indices = [idx for cat, idx in sorted(indexed, key=lambda x: x[0])]
-        if sorted_indices == list(range(len(current_jokers))):
+        candidate_order = [idx for cat, idx in sorted(indexed, key=lambda x: x[0])]
+        if candidate_order == list(range(len(current_jokers))):
             return None
-        return sorted_indices
+
+        curr_names = [current_jokers[i].get("label") or current_jokers[i].get("key", f"Joker #{i}") for i in range(len(current_jokers))]
+        new_names = [current_jokers[i].get("label") or current_jokers[i].get("key", f"Joker #{i}") for i in candidate_order]
+
+        prompt_lines = [
+            "Balatro evaluates Jokers sequentially from left to right during scoring.",
+            "Rule: Chips and +Mult must trigger first, and X-Mult (multiplicative Mult) must trigger last on the far right to maximize score.",
+            "Current jokers:"
+        ]
+        for i, j in enumerate(current_jokers):
+            lbl = j.get("label") or j.get("key", f"Joker #{i}")
+            eff = (j.get("value", {}).get("effect") if isinstance(j.get("value"), dict) else j.get("effect")) or ""
+            prompt_lines.append(f"Position {i}: {lbl}" + (f" ({eff})" if eff else ""))
+
+        prompt_text = "\n".join(prompt_lines)
+
+        candidates = {
+            "order_original": f"Keep original order: {chr(44).join(curr_names)}",
+            "order_optimized": f"Order: {chr(44).join(new_names)} (positions +Chips/+Mult first, and X-Mult on far right to maximize score)",
+        }
+
+        questions = {
+            "order": {
+                "type": "choice",
+                "instructions": "Select the optimal left-to-right arrangement of Jokers to maximize final score.",
+                "criteria": candidates,
+            }
+        }
+
+        try:
+            res = self.agent.predict(prompt_text, questions)
+            choice = res["answers"]["order"]["choice"]
+            if choice == "order_optimized":
+                return candidate_order
+            elif choice == "order_original":
+                return None
+        except Exception:
+            pass
+
+        return candidate_order
