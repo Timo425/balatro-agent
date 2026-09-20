@@ -114,6 +114,14 @@ zero-shot decision engine."*
 So the next step is a fine-tune, and `--dump` produces the data for it: every
 question, its options, the answer, and whether that round was won.
 
+One caution the stress probes make concrete: `greedy` -- a two-line Python rule
+that always plays the biggest hand and never digs -- scores 1.00 against the
+model's 1.17, while a reader that also *digs* scores 2.38. Most of what separates
+a bad player from a decent one here is the play-or-dig call, and that is a
+question about a quantity, which is what this model cannot answer. Any node where
+a model does not clear `greedy` is a node where it is rubber-stamping arithmetic
+Python already did.
+
 [docs/findings.md](docs/findings.md) has the details, including the four
 mis-scored plays that started this and a trace of the tree being played well.
 

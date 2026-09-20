@@ -413,17 +413,29 @@ class HybridBackend(BaseBackend):
     - the question is not one the fast model has been shown to answer, or
     - it answered with less conviction than `min_confidence`.
 
-    This does not raise the score -- the slow model still makes every hard call --
-    it lowers what reaching that score costs. Laya answers in ~33 ms on a GPU and
-    ~350 ms on a CPU against seconds and cents for an API call, so the saving is
-    roughly the escalation rate.
+    `handled` names the question ids the fast model is trusted with, and it is
+    EMPTY BY DEFAULT, because nothing has yet earned a place on it.
 
-    `handled` names the question ids the fast model is trusted with. The default
-    is the hand choice, the only class measured above chance, and nothing else.
+    The obvious candidate was the hand choice: qbench scores the decision model
+    93-100% there. But qbench's version of that question is "which of these
+    scores more", and Python computed those chip counts in order to write the
+    labels -- so a right answer there is agreement with arithmetic, not judgement.
+    Measured against a two-line Python rule that always plays the biggest hand and
+    never digs, over 24 seeds:
+
+        random 0.38   greedy 1.00   first 1.04   laya 1.17   label 2.38
+
+    The model is a whisker ahead of the rule it was supposed to justify replacing,
+    and both are far below a reader that also digs. The value at that node is the
+    play-or-dig call, which the model does not make -- so routing the node to it
+    would hand the cheap model a decision that needs judgement, on the strength of
+    a benchmark that tested something easier.
+
+    Name the question ids explicitly, and measure the split before trusting it.
     """
 
-    #: Measured at 93-100% on qbench; everything else was at chance.
-    DEFAULT_HANDLED = ("which_aim", "which_hand", "which_hand_of_type")
+    #: Nothing yet. See the class docstring for the measurement.
+    DEFAULT_HANDLED: Tuple[str, ...] = ()
 
     def __init__(
         self,
@@ -523,10 +535,14 @@ def create_backend(
     elif b_type in ("agentic", "interactive", "manual"):
         return AgenticBackend(**kwargs)
     elif b_type in ("hybrid", "laya_llm"):
-        # Laya answers the hand choice it is good at; the LLM gets everything else.
+        # Routes nothing to the local model until a question id is named: see
+        # HybridBackend's docstring for why the obvious candidate did not survive
+        # being measured. Pass handled=("...",) to try one.
+        handled = kwargs.pop("handled", None)
         return HybridBackend(
             fast=LayaTreeBackend(),
             slow=ApiLlmBackend(model=model or "gpt-4o", tree=True, **kwargs),
+            handled=handled,
         )
     else:
         raise ValueError(

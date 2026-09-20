@@ -34,6 +34,7 @@ class Counting(ScriptedBackend):
 def hybrid(fast_answers=None, slow_answers=None, confidence=0.9, **kwargs):
     fast = Counting(fast_answers, confidence=confidence)
     slow = Counting(slow_answers, confidence=0.99)
+    kwargs.setdefault("handled", ("which_aim",))
     return HybridBackend(fast=fast, slow=slow, **kwargs), fast, slow
 
 
@@ -122,6 +123,19 @@ class TestFactory(unittest.TestCase):
     def test_unknown_names_still_rejected(self):
         with self.assertRaises(ValueError):
             create_backend("telepathy")
+
+
+class TestNothingIsTrustedByDefault(unittest.TestCase):
+    """The hand choice was the obvious candidate and it did not survive being
+    measured against a plain Python max(), so the default list is empty."""
+
+    def test_default_routes_everything_to_the_slow_model(self):
+        fast = Counting({"which_aim": "a"})
+        slow = Counting({"which_aim": "b"})
+        backend = HybridBackend(fast=fast, slow=slow)
+        self.assertEqual(backend.predict_choice("c", "which_aim", "i", {"a": "A", "b": "B"}), "b")
+        self.assertEqual(fast.seen, [])
+        self.assertEqual(backend.escalation_rate, 1.0)
 
 
 if __name__ == "__main__":

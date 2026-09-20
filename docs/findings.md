@@ -312,22 +312,45 @@ stamping a strategy Python wrote, and the run would measure Python.
 `random` alongside its score; if a change keeps the score up while that gap
 collapses, the tree has started playing.
 
-### Where this model would actually pay: routing, not playing
+### The routing idea, and why the measurement killed it
 
-The one class of question the model answers well -- which hand scores more -- is
-also the most frequent decision in a run. Most turns are hand decisions; blinds,
-shops and packs are a handful each.
+The plan was: the one class of question the model answers well -- which hand
+scores more, 93-100% on qbench -- is also the most frequent decision in a run, so
+let it absorb the volume while an LLM makes the hard calls. Same score, far fewer
+API calls.
 
-So the useful architecture is not Laya instead of an LLM, nor a Laya tool that
-makes an LLM smarter. There is no pruning niche in Balatro: eight cards make 56
-five-card hands, and Python scores all of them exactly in under a millisecond, so
-a cheap approximate scorer has nothing to approximate. And the judgements an LLM
-would want help with are the quantity judgements this model cannot make.
+The flaw is in what qbench was measuring. Its version of that question is "which
+of these scores more", and **Python computed those chip counts in order to write
+the labels**. A right answer there is agreement with arithmetic Python already
+did, not judgement. So the benchmark that justified routing tested something
+easier than the thing being routed.
 
-What it can do is absorb the volume. `--backend hybrid` sends the hand choice to
-Laya when it answers with conviction, and everything else -- and every hesitant
-answer -- to the LLM. The score is the LLM's; the cost is much lower, by roughly
-the share Laya keeps.
+The `greedy` probe settles it: always play the biggest hand on offer, never dig.
+Two lines, no model. Over 24 seeds, tree mode, no jokers:
+
+| policy | mean rounds won |
+| --- | ---: |
+| `random` | 0.38 |
+| **`greedy`** -- plain Python `max()` | **1.00** |
+| `first` | 1.04 |
+| **`laya`** | **1.17** |
+| `label` -- reads the labels and digs | 2.38 |
+
+The model is a whisker ahead of the rule it was supposed to replace, and both sit
+far below a reader that also digs. So the whole gap that matters at this level --
+1.00 to 2.38 -- is the play-or-dig call, which is a question about a quantity,
+which is exactly what this model does not answer.
+
+Routing the hand node to the cheap model would therefore hand it the decision
+that needs judgement while saving the calls that were nearly free. `HybridBackend`
+still exists and is tested, but its trusted list is **empty by default**: no
+question type has earned a place on it yet. Name one explicitly and measure the
+split before believing it.
+
+There is also no pruning niche to fall back on. Eight cards make 56 five-card
+hands and Python scores all of them exactly in under a millisecond, so a cheap
+approximate scorer has nothing to approximate, and a rules check on an LLM's
+proposed move is something Python does exactly and for free.
 
 ### Node shape: one choice, or a poll of yes/no questions?
 

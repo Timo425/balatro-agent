@@ -4,6 +4,11 @@ The probe policies below are MEASURING INSTRUMENTS, not players.
 
   `first`  -- always takes the first option (what Python's own fallback does)
   `random` -- uniform random, the floor any real model must clear
+  `greedy` -- always plays the highest-scoring hand and never digs. This is the
+              two-line Python rule that needs no model at all, because Python
+              computed those chip counts in order to write the labels. Any node
+              where a model does not beat `greedy` is a node where the model is
+              rubber-stamping arithmetic Python already did.
   `label`  -- a perfect reader of the option text, and nothing else
 
 `label` is the important one. It sees exactly what Laya sees -- the same option
@@ -63,6 +68,8 @@ class ProbeBackend(BaseBackend):
             return self.rng.choice(keys)
         if self.policy == "label":
             return self._label_choice(question_id, criteria, keys)
+        if self.policy == "greedy":
+            return self._greedy_choice(criteria, keys)
         return keys[0]
 
     def predict_bool(self, context, question_id, statement, true_desc="", false_desc=""):
@@ -77,6 +84,17 @@ class ProbeBackend(BaseBackend):
         """Probes answer polls by scoring the option they would have chosen."""
         chosen = self.predict_choice(context, question_id, "", criteria)
         return {key: (1.0 if key == chosen else 0.0) for key in criteria}
+
+    def _greedy_choice(self, criteria: Dict[str, str], keys: List[str]) -> str:
+        """Play the biggest hand on offer; never dig.
+
+        Deliberately the dumbest thing Python can do with numbers it already has.
+        """
+        plays = {k: v for k, v in criteria.items() if not k.startswith("dig_")}
+        pool = plays or criteria
+        scored = [(self._chips(v), k) for k, v in pool.items()]
+        best = max(scored)
+        return best[1] if best[0] >= 0 else next(iter(pool))
 
     # -- the label-reading probe ----------------------------------------
     def _label_choice(self, question_id: str, criteria: Dict[str, str], keys: List[str]) -> str:
@@ -337,7 +355,7 @@ def compare(policy: str, mode: str, seeds: Sequence[int], jokers, max_ante: int,
 def main() -> None:
     parser = argparse.ArgumentParser(description="Stress-test Balatro decision trees offline.")
     parser.add_argument("--policy", default="label",
-                        choices=["label", "first", "random", "laya"],
+                        choices=["label", "greedy", "first", "random", "laya"],
                         help="Probe policy, or 'laya' for the real decision model")
     parser.add_argument("--mode", default="both", choices=["tree", "flat", "both"])
     parser.add_argument("--node", default="choice", choices=["choice", "poll"],
