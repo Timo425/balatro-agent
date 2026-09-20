@@ -23,12 +23,15 @@ class BalatroLayaRunner:
         endpoint: str = "http://127.0.0.1:12346",
         rules_path: str = "rules/balatro-strategy.md",
         agent: Optional[Any] = None,
-        backend: str = "laya",
+        backend: str = "laya_tree",
         model: Optional[str] = None,
         **backend_kwargs
     ):
         self.endpoint = endpoint
         if agent is None:
+            # laya_tree by default: on the offline stress harness the hierarchical
+            # tree is worth about +40% rounds over one wide question given the same
+            # information. `backend="laya"` still gives the flat baseline.
             agent = BalatroAgent(rules_path=rules_path, backend=backend, model=model, **backend_kwargs)
         self.client = BalatroBotClient(endpoint=endpoint, rules_path=rules_path, agent=agent)
         self.agent = self.client.agent
@@ -313,8 +316,11 @@ class BalatroLayaRunner:
             "[bold green]Balatro Laya Autonomous Bridge Active[/bold green]\n"
             f"API Endpoint: [cyan]{self.endpoint}[/cyan] (HTTP JSON-RPC 2.0)\n"
             "Mod: [green]coder/balatrobot v1.5.2[/green]\n"
-            "Engine: [magenta]Laya ModernBERT-large + Living Strategy Rulebook[/magenta]",
-            title="Laya Balatro Agent"
+            f"Engine: [magenta]{type(self.agent.backend).__name__}[/magenta] "
+            f"({'hierarchical tree' if self.agent.tree_mode else 'flat'})\n"
+            "[dim]Every move below is the model's answer. Any FALLBACK line means "
+            "Python answered instead.[/dim]",
+            title="Balatro Decision-Model Bench"
         ))
         while True:
             try:
