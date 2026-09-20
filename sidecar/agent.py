@@ -199,16 +199,24 @@ class BalatroAgent:
         }
 
         try:
-            res = self.agent.predict(gamestate_text[:2000], questions)
-            chosen_key = res["answers"]["hand_action"]["choice"]
-            conf = float(res["answers"]["hand_action"].get("confidence", 0.90))
+            chosen_key = self.backend.predict_choice(
+                gamestate_text[:2000],
+                "hand_action",
+                (
+                    "You are playing Balatro. Strategic rules: "
+                    "1. Always prioritize playing winning 5-card hands (Flush, Full House, Straight) if they beat or heavily damage the target chips. "
+                    "2. If current hands are weak (high card or low pair) and target chips are high, prioritize discarding off-suit or low cards to dig for a Flush or synergy. "
+                    "3. Select the single best strategic action."
+                ),
+                criteria,
+            )
             if chosen_key in candidates:
                 act_type, cards, desc = candidates[chosen_key]
                 return AgentAction(
                     action_type=act_type,
                     cards=cards,
-                    reasoning=f"Laya Decision: {desc}",
-                    confidence=conf,
+                    reasoning=f"Decision: {desc}",
+                    confidence=0.90,
                 )
         except Exception:
             pass
@@ -294,11 +302,19 @@ class BalatroAgent:
         }
 
         try:
-            res = self.agent.predict(gamestate_text[:2000], questions)
-            choice = res["answers"]["shop_action"]["choice"]
+            choice = self.backend.predict_choice(
+                gamestate_text[:2000],
+                "shop_action",
+                (
+                    "You are playing Balatro. Review available shop items, money, and current jokers. "
+                    "If a powerful scaling/scoring joker is available, buy it (or sell a weak joker if slots are full). "
+                    "Otherwise save money towards $25 interest."
+                ),
+                criteria,
+            )
             if choice in candidates and choice != "end_shop":
                 act_type, target_idx, desc = candidates[choice]
-                return (act_type, target_idx, f"Laya Decision: {desc}")
+                return (act_type, target_idx, f"Decision: {desc}")
         except Exception:
             pass
 
@@ -367,10 +383,18 @@ class BalatroAgent:
         }
 
         try:
-            res = self.agent.predict(gamestate_text[:2000], questions)
-            choice = res["answers"]["blind_action"]["choice"]
-            if choice == "skip_blind":
-                return ("SKIP", f"Laya Decision: Skipping {blind_name} for Tag '{tag_name}' ({tag_desc}).")
+            res = self.backend.predict_choice(
+                gamestate_text[:2000],
+                "blind_action",
+                (
+                    "Decide whether to play this blind for round payout and shop access, or skip for the tag reward. "
+                    "Only skip if tag offers game-changing value (Negative, Polychrome, Free shop items)."
+                ),
+                candidates,
+            )
+            if res == "skip_blind":
+                return ("SKIP", f"Skipping {blind_name} for Tag: {tag_name}")
+            return ("SELECT", f"Playing {blind_name} for cash and shop.")
         except Exception:
             pass
 

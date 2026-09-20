@@ -31,7 +31,7 @@ class BaseBackend(ABC):
 class LayaBackend(BaseBackend):
     """Laya local offline ModernBERT System 1 decision model."""
 
-    def __init__(self, model_name: str = "convaiinnovations/laya"):
+    def __init__(self, model_name: str = "convaiinnovations/laya", **kwargs):
         import laya
         self.model_name = model_name
         self.agent = laya.load(model_name)
@@ -162,6 +162,7 @@ class AgenticBackend(BaseBackend):
         self,
         decision_hook: Optional[Callable[[str, str, str, Dict[str, str]], str]] = None,
         interactive: bool = False,
+        **kwargs,
     ):
         self.decision_hook = decision_hook
         self.interactive = interactive
