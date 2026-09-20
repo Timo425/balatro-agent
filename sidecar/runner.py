@@ -33,6 +33,7 @@ class BalatroLayaRunner:
         self.client = BalatroBotClient(endpoint=endpoint, rules_path=rules_path, agent=agent)
         self.agent = self.client.agent
         self.last_state_name = None
+        self._reported_fallbacks = 0
 
     def check_joker_rearrange(self, raw_g: dict):
         """Ensures RULE_JOKER_ORDER (+Chips -> +Flat Mult -> +Scaling -> X-Mult)."""
@@ -85,6 +86,13 @@ class BalatroLayaRunner:
 
         console.print(table)
         console.print(f"[bold cyan]Action:[/bold cyan] {action.action_type} | [bold cyan]Reasoning:[/bold cyan] {action.reasoning}")
+        fallbacks = getattr(self.agent.backend, "fallbacks", 0)
+        if fallbacks > self._reported_fallbacks:
+            self._reported_fallbacks = fallbacks
+            console.print(
+                f"[bold red]⚠ FALLBACK #{fallbacks}[/bold red] the model did not answer; "
+                "Python picked. This run no longer measures the model alone."
+            )
 
         card_indices = [c.id for c in action.cards]
         if action.action_type == "PLAY":
@@ -194,21 +202,9 @@ class BalatroLayaRunner:
                 time.sleep(0.5)
                 return
 
-        # Check Booster packs
-        packs_raw = extract_cards_list(raw_g, "packs")
-        if packs_raw and (dollars >= 25 or (ante <= 2 and len(current_jokers) < 2)):
-            for p_idx, pack in enumerate(packs_raw):
-                if not isinstance(pack, dict):
-                    continue
-                p_cost = pack.get("cost")
-                cost = p_cost.get("buy", 6) if isinstance(p_cost, dict) else (p_cost if isinstance(p_cost, int) else 6)
-                if dollars - cost >= (20 if ante >= 3 else 0):
-                    pack_name = pack.get("label") or pack.get("key", "Booster Pack")
-                    console.print(f"[bold green]🎁 Buying Booster Pack:[/bold green] '{pack_name}' (${cost})")
-                    self.client.buy_pack(p_idx)
-                    time.sleep(0.5)
-                    return
-
+        # No automatic pack buying here: booster packs are offered to the model as
+        # one of the shop categories above. If it did not choose one, Python does
+        # not get to buy one on its behalf (see CLAUDE.md).
         console.print(f"[bold yellow]🚪 Shop Decision:[/bold yellow] Ending shop (bankroll preserved for interest).")
         console.print(f"[bold yellow]>> LEAVING SHOP (NEXT ROUND)[/bold yellow]")
         self.client.next_round()
@@ -235,10 +231,11 @@ class BalatroLayaRunner:
         console.print(table)
 
         decision = self.agent.decide_pack_card(
-            pack_cards, 
-            hand=state.hand, 
-            jokers_count=len(state.jokers), 
-            max_jokers=max_jokers
+            pack_cards,
+            hand=state.hand,
+            jokers_count=len(state.jokers),
+            max_jokers=max_jokers,
+            raw_g=raw_g,
         )
 
         if decision is not None:

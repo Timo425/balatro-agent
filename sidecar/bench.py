@@ -289,6 +289,7 @@ class BalatroBenchmark:
         headless: bool = False,
         fast: bool = True,
         stay_on_death: bool = True,
+        node: str = "poll",
     ):
         self.endpoint = endpoint
         self.backend_type = backend
@@ -314,7 +315,11 @@ class BalatroBenchmark:
             api_key=api_key,
             api_base=api_base,
         )
-        self.agent = BalatroAgent(backend=backend_obj)
+        self.node = node
+        self.agent = BalatroAgent(
+            backend=backend_obj,
+            poll_mode=(node == "poll" and getattr(backend_obj, "is_tree", False)),
+        )
         self.client = BalatroBotClient(endpoint=endpoint, agent=self.agent)
 
     def ensure_game_running(self) -> bool:
@@ -448,9 +453,19 @@ class BalatroBenchmark:
             time.sleep(0.1)
 
         elapsed = time.time() - start_time
+        telemetry = self.agent.backend.telemetry()
+        if telemetry.get("fallbacks"):
+            console.print(
+                f"[bold red]⚠ {telemetry['fallbacks']} fallback decision(s)[/bold red] -- "
+                "the model did not answer and Python picked. This result does not "
+                "measure the model alone."
+            )
         return {
             "seed": seed,
             "backend": self.backend_type,
+            "node": self.node,
+            "decisions": telemetry.get("calls", 0),
+            "fallbacks": telemetry.get("fallbacks", 0),
             "model": self.model or "default",
             "ante_reached": last_ante,
             "rounds_reached": last_round,
@@ -576,7 +591,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Launch Balatro automatically + run one seed (Laya backend)
+  # Launch Balatro automatically + run one seed (hierarchical Laya tree)
   PYTHONPATH=. .venv/bin/python sidecar/bench.py --auto-launch --seeds AAAAAAA
 
   # All 5 official seeds, headless mode
@@ -590,8 +605,11 @@ Examples:
   PYTHONPATH=. .venv/bin/python sidecar/bench.py --auto-launch --output results.json
 """
     )
-    parser.add_argument("--backend", default="laya", choices=["laya", "laya_tree", "api_llm", "agentic"],
-                        help="Decision backend (default: laya, choices: laya, laya_tree, api_llm, agentic)")
+    parser.add_argument("--backend", default="laya_tree",
+                        choices=["laya", "laya_tree", "api_llm", "api_llm_tree", "agentic"],
+                        help="Decision backend (default: laya_tree, the hierarchical Laya tree)")
+    parser.add_argument("--node", default="poll", choices=["poll", "choice"],
+                        help="Tree node shape: batched yes/no poll (default) or one wide choice")
     parser.add_argument("--model", default=None,
                         help="Model identifier (e.g. gpt-4o, claude-3-5-sonnet)")
     parser.add_argument("--seeds", default=None,
@@ -633,6 +651,7 @@ Examples:
         headless=args.headless,
         fast=fast,
         stay_on_death=stay_on_death,
+        node=args.node,
     )
 
     bench.run_suite(seeds=seed_list, runs_per_seed=args.runs, output_file=args.output)

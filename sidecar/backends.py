@@ -1,20 +1,72 @@
-"""
-Balatro Agent Backends:
-Supports Tri-Modal execution:
-1. "laya" (Decision Model): Fast local offline ModernBERT-based decision model.
-2. "api_llm" (API LLM): Stateless frontier LLM via OpenAI/Anthropic/OpenRouter/Gemini API for automated benchmarking.
-3. "agentic" (Agentic AI): Interactive or programmatic agent hook with rich inspection, simulation, and manual/tool override.
+"""Balatro decision backends.
+
+Every backend answers the same two primitives, and every in-game action is the
+direct result of one of these answers:
+
+- `predict_choice` -> picks one key out of a small set of labelled options
+- `predict_bool`   -> answers a yes/no question
+
+Four implementations:
+1. "laya"       -- local Laya decision model, flat (one question per decision)
+2. "laya_tree"  -- local Laya decision model, hierarchical (small questions in sequence)
+3. "api_llm"    -- stateless frontier LLM over an OpenAI-compatible API
+4. "agentic"    -- an external agent or a human answering interactively
+
+Python supplies options and facts. The backend supplies the decision. If a
+backend fails, the fallback is recorded in `fallbacks` and surfaced in telemetry:
+a run with fallbacks is Python's play, not the model's, and must not be reported
+as a model result. See CLAUDE.md.
 """
 
+import json
 import os
 import re
-import json
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional, Callable
+from typing import Any, Callable, Dict, Optional, Tuple
+
 import httpx
+
+# Laya shares one token budget between a question's options and its instructions:
+# when the options overrun it, the instructions are truncated to as few as 8
+# tokens. Keeping questions under these limits is what stops that happening.
+MAX_OPTIONS_PER_QUESTION = 6
+MAX_OPTION_TOKENS = 30
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough token count for budget checks (~3.6 characters per token)."""
+    return max(1, int(len(str(text)) / 3.6) + 1)
+
+
+def head_budget(instructions: str, criteria: Dict[str, str]) -> Dict[str, int]:
+    """How many head tokens a question would use, the way Laya lays it out.
+
+    Laya builds `[CLS] instructions [SEP] [MASK] opt0 [MASK] opt1 ... [SEP] state`,
+    and the options are charged first. When they overrun `head_max_len` the
+    instructions are cut down to as little as 8 tokens and each option is clipped
+    to a few characters, which is how a carefully worded prompt silently becomes
+    noise. Use this to keep questions inside the budget.
+    """
+    option_tokens = sum(estimate_tokens(f"{k}: {v}") + 1 for k, v in criteria.items())
+    return {
+        "options": len(criteria),
+        "option_tokens": option_tokens,
+        "instruction_tokens": estimate_tokens(instructions),
+        "total": option_tokens + estimate_tokens(instructions),
+    }
+
 
 class BaseBackend(ABC):
     """Abstract base class for all Balatro decision backends."""
+
+    #: Backends that can read a long markdown gamestate rather than a compact brief.
+    wants_full_context: bool = False
+    is_tree: bool = False
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.fallbacks = 0
+        self.last_confidence: Optional[float] = None
 
     @abstractmethod
     def predict_choice(
@@ -25,27 +77,91 @@ class BaseBackend(ABC):
         criteria: Dict[str, str],
     ) -> str:
         """Selects one key from criteria based on context and instructions."""
-        pass
+
+    def predict_bool(
+        self,
+        context: str,
+        question_id: str,
+        statement: str,
+        true_desc: str = "",
+        false_desc: str = "",
+    ) -> bool:
+        """Answers a yes/no question. Defaults to a two-option choice."""
+        criteria = {
+            "yes": true_desc or "yes, the statement holds",
+            "no": false_desc or "no, the statement does not hold",
+        }
+        return self.predict_choice(context, question_id, statement, criteria) == "yes"
+
+    def rank_options(
+        self,
+        context: str,
+        question_id: str,
+        statement_for: Callable[[str, str], str],
+        criteria: Dict[str, str],
+    ) -> Dict[str, float]:
+        """Scores every option independently and returns the model's own scores.
+
+        The default implementation just asks the ordinary choice question and
+        reports the winner, so backends that have no per-option scoring still work.
+        """
+        chosen = self.predict_choice(
+            context, question_id, statement_for("", ""), criteria
+        )
+        return {key: (1.0 if key == chosen else 0.0) for key in criteria}
+
+    def note_fallback(self) -> None:
+        self.fallbacks += 1
+
+    def telemetry(self) -> Dict[str, Any]:
+        return {
+            "calls": self.calls,
+            "fallbacks": self.fallbacks,
+            "last_confidence": self.last_confidence,
+        }
 
 
 class LayaBackend(BaseBackend):
-    """Laya local offline ModernBERT System 1 decision model."""
+    """Laya: a local, non-autoregressive System 1 decision model.
+
+    Laya never generates text; it scores each option at its own marker token. It
+    cannot do arithmetic, so every number it needs must already be in the option
+    text. It also has a hard option-token budget -- see `MAX_OPTIONS_PER_QUESTION`.
+    """
 
     def __init__(
         self,
         model_name: str = "convaiinnovations/laya",
-        max_len: int = 512,
-        head_max_len: int = 192,
+        subfolder: Optional[str] = None,
+        max_len: Optional[int] = None,
+        head_max_len: Optional[int] = None,
+        device: Optional[str] = None,
         **kwargs,
     ):
+        super().__init__()
         import laya
+
         self.model_name = model_name
-        self.agent = laya.load(model_name)
-        if max_len != 512:
+        self.subfolder = subfolder
+        self.agent = laya.load(model_name, device=device, subfolder=subfolder)
+        # Only override the checkpoint's own budgets when explicitly asked: the
+        # English root was trained at 512/192 and the typed-decisions checkpoint at
+        # 1024/256, and feeding one the other's budget wastes both.
+        if max_len is not None:
             self.agent.cfg["max_len"] = max_len
-        if head_max_len != 192:
+        if head_max_len is not None:
             self.agent.cfg["head_max_len"] = head_max_len
-        self.max_chars = max_len * 4
+        self.max_len = self.agent.cfg.get("max_len", 512)
+        self.head_max_len = self.agent.cfg.get("head_max_len", 192)
+        # Roughly 4 characters per token, minus the head the options occupy.
+        self.max_chars = max(400, (self.max_len - self.head_max_len) * 4)
+
+    def _ask(self, context: str, question_id: str, qdef: Dict[str, Any]) -> Dict[str, Any]:
+        self.calls += 1
+        res = self.agent.predict(context[: self.max_chars], {question_id: qdef})
+        answer = res["answers"][question_id]
+        self.last_confidence = answer.get("confidence")
+        return answer
 
     def predict_choice(
         self,
@@ -54,40 +170,80 @@ class LayaBackend(BaseBackend):
         instructions: str,
         criteria: Dict[str, str],
     ) -> str:
+        answer = self._ask(
+            context,
+            question_id,
+            {"type": "choice", "instructions": instructions, "criteria": criteria},
+        )
+        return answer["choice"]
+
+    def predict_bool(
+        self,
+        context: str,
+        question_id: str,
+        statement: str,
+        true_desc: str = "",
+        false_desc: str = "",
+    ) -> bool:
+        qdef: Dict[str, Any] = {"type": "noul", "instructions": statement}
+        if true_desc or false_desc:
+            qdef["criteria"] = {"true": true_desc, "false": false_desc}
+        answer = self._ask(context, question_id, qdef)
+        return float(answer["noul"]) >= 0.5
+
+
+    def rank_options(
+        self,
+        context: str,
+        question_id: str,
+        statement_for: Callable[[str, str], str],
+        criteria: Dict[str, str],
+    ) -> Dict[str, float]:
+        """Poll: one yes/no question per option, all in a single forward pass.
+
+        `noul` is Laya's strongest primitive (0.857 against 0.733 for `choice` on
+        its own benchmark) and a two-option question never runs out of head budget,
+        however many candidates there are. Every number below comes from the model;
+        picking the highest is reading its answer, not overruling it.
+        """
+        if not criteria:
+            return {}
         questions = {
-            question_id: {
-                "type": "choice",
-                "instructions": instructions,
-                "criteria": criteria,
-            }
+            key: {"type": "noul", "instructions": statement_for(key, label)}
+            for key, label in criteria.items()
         }
-        res = self.agent.predict(context[:self.max_chars], questions)
-        return res["answers"][question_id]["choice"]
+        self.calls += 1
+        result = self.agent.predict(context[: self.max_chars], questions)
+        scores = {key: float(result["answers"][key]["noul"]) for key in criteria}
+        confidences = [result["answers"][key].get("confidence", 0.0) for key in criteria]
+        self.last_confidence = max(confidences) if confidences else None
+        return scores
 
 
 class LayaTreeBackend(LayaBackend):
-    """Hierarchical decision tree backend using Laya ModernBERT at 1024 tokens."""
+    """Laya driving a hierarchical decision tree.
+
+    Defaults to the `typed-decisions` checkpoint, which is the one fine-tuned for
+    structured typed questions (0.766 accuracy on its benchmark against 0.362 for
+    the English base checkpoint) and which natively runs the 1024/256 budget that
+    the extra tree context needs.
+    """
 
     is_tree = True
 
     def __init__(
         self,
         model_name: str = "convaiinnovations/laya",
-        max_len: int = 1024,
-        head_max_len: int = 256,
+        subfolder: Optional[str] = "typed-decisions",
         **kwargs,
     ):
-        super().__init__(
-            model_name=model_name,
-            max_len=max_len,
-            head_max_len=head_max_len,
-            **kwargs,
-        )
-
+        super().__init__(model_name=model_name, subfolder=subfolder, **kwargs)
 
 
 class ApiLlmBackend(BaseBackend):
     """API LLM backend for automated benchmarking (OpenAI, Anthropic, Gemini, OpenRouter, Ollama)."""
+
+    wants_full_context = True
 
     def __init__(
         self,
@@ -95,9 +251,12 @@ class ApiLlmBackend(BaseBackend):
         api_key: Optional[str] = None,
         api_base: Optional[str] = None,
         timeout: float = 45.0,
+        tree: bool = False,
     ):
+        super().__init__()
         self.model = model
         self.timeout = timeout
+        self.is_tree = tree
 
         # Detect provider from model name or environment
         if api_base:
@@ -129,6 +288,7 @@ class ApiLlmBackend(BaseBackend):
         if not criteria:
             raise ValueError("Criteria cannot be empty")
 
+        self.calls += 1
         options_text = "\n".join(f"- {k}: {desc}" for k, desc in criteria.items())
         valid_keys = list(criteria.keys())
 
@@ -148,7 +308,6 @@ class ApiLlmBackend(BaseBackend):
             f"Select the single best key to maximize expected chips and survival."
         )
 
-        # Call OpenAI-compatible /v1/chat/completions endpoint
         endpoint = f"{self.api_base}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -170,25 +329,25 @@ class ApiLlmBackend(BaseBackend):
             data = resp.json()
             content = data["choices"][0]["message"]["content"]
 
-            # Parse choice from JSON
             parsed = json.loads(content)
             choice = parsed.get("choice", "")
             if choice in criteria:
                 return choice
 
-            # Fallback search for any valid key in content
             for k in valid_keys:
-                if f"\"{k}\"" in content or f"'{k}'" in content or re.search(rf"\\b{re.escape(k)}\\b", content):
+                if f'"{k}"' in content or f"'{k}'" in content or re.search(rf"\b{re.escape(k)}\b", content):
                     return k
-        except Exception as e:
-            # If API call fails or no API key, check if first key is available
+        except Exception:
             pass
 
+        self.note_fallback()
         return valid_keys[0]
 
 
 class AgenticBackend(BaseBackend):
-    """Agentic AI backend for interactive play, EV simulation, or external controller hook."""
+    """Agentic AI backend: an external agent loop, a test hook, or a human at the console."""
+
+    wants_full_context = True
 
     def __init__(
         self,
@@ -196,6 +355,7 @@ class AgenticBackend(BaseBackend):
         interactive: bool = False,
         **kwargs,
     ):
+        super().__init__()
         self.decision_hook = decision_hook
         self.interactive = interactive
 
@@ -210,7 +370,8 @@ class AgenticBackend(BaseBackend):
         if not valid_keys:
             return ""
 
-        # 1. External hook (e.g. from agent loop or test)
+        self.calls += 1
+
         if self.decision_hook:
             try:
                 res = self.decision_hook(context, question_id, instructions, criteria)
@@ -219,7 +380,6 @@ class AgenticBackend(BaseBackend):
             except Exception:
                 pass
 
-        # 2. Interactive console input
         if self.interactive:
             print(f"\n--- AGENTIC DECISION: {question_id} ---")
             print(f"Instructions: {instructions}")
@@ -236,7 +396,7 @@ class AgenticBackend(BaseBackend):
                 except (ValueError, KeyboardInterrupt):
                     break
 
-        # 3. Default to highest priority candidate (first key)
+        self.note_fallback()
         return valid_keys[0]
 
 
@@ -253,10 +413,12 @@ def create_backend(
         return LayaTreeBackend(model_name=model or "convaiinnovations/laya", **kwargs)
     elif b_type in ("api", "api_llm", "llm"):
         return ApiLlmBackend(model=model or "gpt-4o", **kwargs)
+    elif b_type in ("api_llm_tree", "llm_tree"):
+        return ApiLlmBackend(model=model or "gpt-4o", tree=True, **kwargs)
     elif b_type in ("agentic", "interactive", "manual"):
         return AgenticBackend(**kwargs)
     else:
         raise ValueError(
-            f"Unknown backend type: '{backend_type}'. Choose 'laya', 'laya_tree', 'api_llm', or 'agentic'."
+            f"Unknown backend type: '{backend_type}'. Choose 'laya', 'laya_tree', "
+            f"'api_llm', 'api_llm_tree', or 'agentic'."
         )
-

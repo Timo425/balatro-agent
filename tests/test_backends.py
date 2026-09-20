@@ -1,50 +1,102 @@
 import unittest
 from unittest.mock import MagicMock, patch
-from sidecar.backends import BaseBackend, LayaBackend, ApiLlmBackend, AgenticBackend, create_backend
-from sidecar.agent import BalatroAgent
 
-class TestBackends(unittest.TestCase):
-    def test_agentic_backend_hook(self):
-        def my_hook(context, question_id, instructions, criteria):
-            return "opt_b"
+from sidecar.backends import (
+    AgenticBackend,
+    ApiLlmBackend,
+    BaseBackend,
+    create_backend,
+    estimate_tokens,
+    head_budget,
+)
 
-        backend = AgenticBackend(decision_hook=my_hook)
-        choice = backend.predict_choice("test context", "test_q", "choose", {"opt_a": "A", "opt_b": "B"})
-        self.assertEqual(choice, "opt_b")
 
-    def test_agentic_backend_default(self):
+class TestAgenticBackend(unittest.TestCase):
+    def test_hook_answer_is_used(self):
+        backend = AgenticBackend(decision_hook=lambda *_: "opt_b")
+        self.assertEqual(
+            backend.predict_choice("ctx", "q", "choose", {"opt_a": "A", "opt_b": "B"}), "opt_b")
+        self.assertEqual(backend.fallbacks, 0)
+
+    def test_no_hook_falls_back_and_says_so(self):
         backend = AgenticBackend()
-        choice = backend.predict_choice("test context", "test_q", "choose", {"opt_1": "1", "opt_2": "2"})
-        self.assertEqual(choice, "opt_1")
+        self.assertEqual(backend.predict_choice("ctx", "q", "choose", {"a": "1", "b": "2"}), "a")
+        self.assertEqual(backend.fallbacks, 1)
 
-    def test_create_backend_factory(self):
-        b_agentic = create_backend("agentic")
-        self.assertIsInstance(b_agentic, AgenticBackend)
+    def test_bool_defaults_to_a_two_option_choice(self):
+        seen = {}
 
-        b_api = create_backend("api_llm", model="gpt-4o")
-        self.assertIsInstance(b_api, ApiLlmBackend)
+        class Recording(AgenticBackend):
+            def predict_choice(self, context, question_id, instructions, criteria):
+                seen.update(criteria)
+                return "yes"
 
+        self.assertTrue(Recording().predict_bool("ctx", "q", "is it so?", "yep", "nope"))
+        self.assertEqual(seen, {"yes": "yep", "no": "nope"})
+
+    def test_rank_options_default_reports_the_choice(self):
+        backend = AgenticBackend(decision_hook=lambda *_: "b")
+        scores = backend.rank_options("ctx", "q", lambda k, v: f"pick {v}", {"a": "A", "b": "B"})
+        self.assertEqual(max(scores, key=lambda k: scores[k]), "b")
+
+
+class TestFactory(unittest.TestCase):
+    def test_known_backends(self):
+        self.assertIsInstance(create_backend("agentic"), AgenticBackend)
+        self.assertIsInstance(create_backend("api_llm", model="gpt-4o"), ApiLlmBackend)
+        self.assertTrue(create_backend("api_llm_tree", model="gpt-4o").is_tree)
+        self.assertFalse(create_backend("api_llm", model="gpt-4o").is_tree)
+
+    def test_unknown_backend_is_rejected(self):
+        with self.assertRaises(ValueError):
+            create_backend("telepathy")
+
+
+class TestApiLlmBackend(unittest.TestCase):
     @patch("httpx.Client.post")
-    def test_api_llm_backend_parsing(self, mock_post):
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "choices": [{"message": {"content": "{\"choice\": \"opt_target\", \"reasoning\": \"best move\"}"}}]
-        }
-        mock_post.return_value = mock_resp
+    def test_choice_is_parsed_from_json(self, mock_post):
+        mock_post.return_value = MagicMock(json=lambda: {
+            "choices": [{"message": {"content": '{"choice": "opt_target", "reasoning": "best"}'}}]})
+        backend = ApiLlmBackend(model="gpt-4o", api_key="dummy")
+        self.assertEqual(
+            backend.predict_choice("ctx", "q", "choose", {"opt_other": "o", "opt_target": "t"}),
+            "opt_target")
+        self.assertEqual(backend.fallbacks, 0)
 
-        backend = ApiLlmBackend(model="gpt-4o", api_key="dummy_key")
-        choice = backend.predict_choice(
-            "context",
-            "shop_action",
-            "choose",
-            {"opt_other": "other", "opt_target": "target"}
-        )
-        self.assertEqual(choice, "opt_target")
+    @patch("httpx.Client.post", side_effect=RuntimeError("no network"))
+    def test_api_failure_is_recorded_as_a_fallback(self, _mock_post):
+        backend = ApiLlmBackend(model="gpt-4o", api_key="dummy")
+        self.assertEqual(backend.predict_choice("ctx", "q", "choose", {"a": "1", "b": "2"}), "a")
+        self.assertEqual(backend.fallbacks, 1)
 
-    def test_balatro_agent_with_agentic_backend(self):
-        backend = AgenticBackend(decision_hook=lambda *args: "play_flush")
-        agent = BalatroAgent(backend=backend)
-        self.assertEqual(agent.backend, backend)
+
+class TestHeadBudget(unittest.TestCase):
+    def test_tokens_grow_with_text(self):
+        self.assertLess(estimate_tokens("short"), estimate_tokens("a much longer piece of text"))
+
+    def test_budget_counts_options_and_instructions(self):
+        budget = head_budget("Which hand?", {"a": "Pair 9S 9D: ~56 chips, WEAK"})
+        self.assertEqual(budget["options"], 1)
+        self.assertEqual(budget["total"], budget["option_tokens"] + budget["instruction_tokens"])
+
+    def test_a_wide_question_overruns_the_english_head(self):
+        crowded = {f"option_{i}": f"Play some hand number {i} for a middling number of chips"
+                   for i in range(12)}
+        self.assertGreater(head_budget("Which hand should the player play?", crowded)["total"], 192)
+
+
+class TestTelemetry(unittest.TestCase):
+    def test_telemetry_reports_calls_and_fallbacks(self):
+        backend = AgenticBackend()
+        backend.predict_choice("ctx", "q", "choose", {"a": "1"})
+        info = backend.telemetry()
+        self.assertEqual(info["calls"], 1)
+        self.assertEqual(info["fallbacks"], 1)
+
+    def test_base_backend_is_abstract(self):
+        with self.assertRaises(TypeError):
+            BaseBackend()
+
 
 if __name__ == "__main__":
     unittest.main()

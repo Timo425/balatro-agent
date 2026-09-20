@@ -1,32 +1,36 @@
-"""
-Balatro Autonomous AI Agent
-Driven 100% by Laya (ModernBERT System 1) decisions using BalatroLLM strategy templates.
-Python acts solely as the interface: enumerating legal candidate actions with real
-in-game scores and executing Laya's decisions via JSON-RPC.
+"""Balatro agent: turns the board into decisions for a model, and the model's
+answers into moves.
+
+THE ONE RULE OF THIS FILE (see CLAUDE.md for the long version):
+
+    Python enumerates legal moves and states facts about them.
+    The backend -- Laya, an LLM, or a human -- chooses which one happens.
+
+So there is no `if best_hand_beats_target: play it` anywhere below, no sorting of
+options by quality, no "top 3 only", and no silent heuristic when the model is
+unsure. Where a decision is unavoidable and the model could not answer, the
+fallback is counted in `backend.fallbacks` and labelled FALLBACK in the reasoning
+so that a run tainted by Python's own play is visible in the telemetry.
 """
 
-import itertools
 import re
-from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from sidecar.poker_eval import Card, PokerEvaluator
+from sidecar.backends import MAX_OPTIONS_PER_QUESTION, BaseBackend, create_backend
+from sidecar.brief import blind_brief, discard_brief, hand_brief, shop_brief
+from sidecar.candidates import (
+    DiscardPlan,
+    PlayOption,
+    annotate_play_options,
+    enumerate_discard_plans,
+    enumerate_play_cores,
+    pick_filler,
+)
+from sidecar.poker_eval import Card
 from sidecar.strategy import StrategyManager
-from sidecar.backends import BaseBackend, create_backend
-
-DEFAULT_HAND_SCORES = {
-    "Straight Flush": (100, 8),
-    "Four of a Kind": (60, 7),
-    "Full House": (40, 4),
-    "Flush": (35, 4),
-    "Straight": (30, 4),
-    "Three of a Kind": (30, 3),
-    "Two Pair": (20, 2),
-    "Pair": (10, 2),
-    "High Card": (5, 1),
-}
+from sidecar.synergy import JokerSynergyAnalyzer, SynergyProfile
 
 
 @dataclass
@@ -50,21 +54,63 @@ class AgentAction:
     confidence: float
 
 
-def find_weakest_joker_index(jokers: List[Dict[str, Any]]) -> Optional[int]:
-    """Finds the lowest-tier sellable joker when slots are full."""
-    if not jokers:
-        return None
-    for idx, j in enumerate(jokers):
-        if not isinstance(j, dict):
-            continue
-        mod = j.get("modifier")
-        if isinstance(mod, dict) and mod.get("eternal"):
-            continue
-        return idx
-    return 0
+@dataclass
+class HandFacts:
+    """Everything true about the current hand, with nothing ranked or chosen."""
+
+    needed: int
+    plays: List[PlayOption]
+    discards: List[DiscardPlan]
+    jokers: List[Dict[str, Any]]
+    profile: SynergyProfile
+    play_context: str
+    discard_context: str
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(text).lower()).strip("_")[:24] or "item"
+
+
+def _jokers_from(raw_g: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    val = (raw_g or {}).get("jokers")
+    if isinstance(val, dict):
+        cards = val.get("cards", [])
+        return [c for c in cards if isinstance(c, dict)] if isinstance(cards, list) else []
+    if isinstance(val, list):
+        return [c for c in val if isinstance(c, dict)]
+    return []
+
+
+def _cost_of(item: Dict[str, Any], default: int) -> int:
+    cost = item.get("cost")
+    if isinstance(cost, dict):
+        return int(cost.get("buy", default))
+    return int(cost) if isinstance(cost, int) else default
+
+
+def _sell_value(joker: Dict[str, Any]) -> int:
+    cost = joker.get("cost")
+    if isinstance(cost, dict):
+        return int(cost.get("sell", 1))
+    return int(cost) if isinstance(cost, int) else 1
+
+
+def _effect_of(item: Dict[str, Any]) -> str:
+    val = item.get("value") if isinstance(item.get("value"), dict) else {}
+    return str(item.get("effect") or val.get("effect") or "").strip()
+
+
+def _name_of(item: Dict[str, Any], fallback: str = "Item") -> str:
+    return str(item.get("name") or item.get("label") or item.get("key") or fallback)
+
+
+def _is_eternal(joker: Dict[str, Any]) -> bool:
+    mod = joker.get("modifier")
+    return bool(isinstance(mod, dict) and mod.get("eternal"))
+
 
 class BalatroAgent:
-    """Autonomous Balatro agent where Laya makes 100% of game decisions."""
+    """Presents the board to a decision backend and executes what it answers."""
 
     def __init__(
         self,
@@ -72,7 +118,8 @@ class BalatroAgent:
         strategy_name: str = "default",
         backend: Any = "laya",
         model: Optional[str] = None,
-        tree_mode: bool = False,
+        tree_mode: Optional[bool] = None,
+        poll_mode: Optional[bool] = None,
         **backend_kwargs,
     ):
         self.rules_path = Path(rules_path)
@@ -83,485 +130,364 @@ class BalatroAgent:
         else:
             self.backend = create_backend(backend_type=str(backend), model=model, **backend_kwargs)
         self.agent = getattr(self.backend, "agent", None)
-        self.tree_mode = (
-            tree_mode
-            or getattr(self.backend, "is_tree", False)
-            or str(backend).lower() in ("laya_tree", "tree", "hierarchical")
-        )
+        if tree_mode is None:
+            tree_mode = bool(getattr(self.backend, "is_tree", False)) or str(backend).lower() in (
+                "laya_tree", "tree", "hierarchical", "api_llm_tree", "llm_tree",
+            )
+        self.tree_mode = tree_mode
+        self.poll_mode = bool(poll_mode) if poll_mode is not None else self.tree_mode
+        self.analyzer = JokerSynergyAnalyzer()
+
+    # ------------------------------------------------------------------
+    # Backend plumbing
+    # ------------------------------------------------------------------
 
     def _get_max_chars(self) -> int:
-        return getattr(self.backend, "max_chars", 2000)
+        return getattr(self.backend, "max_chars", 4000)
 
-    def _render_state(self, raw_g: Optional[Dict[str, Any]], state: Optional[BalatroGameState] = None) -> str:
-        """Renders gamestate markdown via BalatroLLM Jinja template."""
-        if raw_g:
+    def _context(self, brief: str, raw_g: Optional[Dict[str, Any]]) -> str:
+        """The brief for decision models; the full markdown gamestate for LLMs.
+
+        Laya reads a few hundred tokens and truncates the rest, so handing it the
+        full BalatroLLM markdown cut off the hand itself. LLM backends have room
+        for everything, and lose nothing by getting both.
+        """
+        if getattr(self.backend, "wants_full_context", False) and raw_g:
             try:
-                return self.sm.render_gamestate(raw_g)
+                return (brief + "\n\n" + self.sm.render_gamestate(raw_g))[: self._get_max_chars()]
             except Exception:
                 pass
-        if state:
-            return (
-                f"# Balatro Game State\n"
-                f"- Ante: {state.ante} | Blind: {state.blind_name}\n"
-                f"- Target: {state.target_chips} | Current: {state.current_chips}\n"
-                f"- Hands Left: {state.hands_left} | Discards Left: {state.discards_left}\n"
-                f"- Money: ${state.money}\n"
-                f"- Jokers: {', '.join(state.jokers) if state.jokers else 'None'}\n"
-            )
-        return "# Balatro Game State (in progress)"
+        return brief[: self._get_max_chars()]
 
-    def decide_hand_action(self, state: BalatroGameState, raw_g: Optional[Dict[str, Any]] = None) -> AgentAction:
+    def _choose(
+        self,
+        context: str,
+        question_id: str,
+        instructions: str,
+        criteria: Dict[str, str],
+    ) -> Optional[str]:
+        """Asks the backend to pick a key. Returns None when it could not answer."""
+        if not criteria:
+            return None
+        try:
+            choice = self.backend.predict_choice(context, question_id, instructions, criteria)
+        except Exception:
+            choice = None
+        if choice in criteria:
+            return choice
+        self.backend.note_fallback()
+        return None
+
+    def _poll(
+        self,
+        context: str,
+        question_id: str,
+        statement_for,
+        criteria: Dict[str, str],
+    ) -> Optional[str]:
+        """Asks the backend to score every option, and returns its highest.
+
+        Used where the option list is long or the model answers yes/no questions
+        better than wide multiple choice. Python compares nothing of its own here:
+        every score is the model's.
         """
-        Enumerates all distinct playable hands (using live in-game chip/mult levels from raw_g)
-        and discard options, then queries Laya to choose the action.
+        if not criteria:
+            return None
+        try:
+            scores = self.backend.rank_options(context, question_id, statement_for, criteria)
+        except Exception:
+            scores = {}
+        scores = {k: v for k, v in scores.items() if k in criteria}
+        if not scores:
+            self.backend.note_fallback()
+            return None
+        return max(scores, key=lambda k: scores[k])
+
+    def _pick(
+        self,
+        context: str,
+        question_id: str,
+        instructions: str,
+        criteria: Dict[str, str],
+        statement_for=None,
+    ) -> Optional[str]:
+        """One decision node: a poll when polling is enabled, a choice otherwise."""
+        if self.poll_mode and statement_for is not None:
+            return self._poll(context, question_id, statement_for, criteria)
+        return self._choose(context, question_id, instructions, criteria)
+
+    def _ask_bool(
+        self,
+        context: str,
+        question_id: str,
+        statement: str,
+        true_desc: str,
+        false_desc: str,
+        on_failure: bool,
+    ) -> bool:
+        try:
+            return bool(self.backend.predict_bool(context, question_id, statement, true_desc, false_desc))
+        except Exception:
+            self.backend.note_fallback()
+            return on_failure
+
+    # ------------------------------------------------------------------
+    # Hand decisions
+    # ------------------------------------------------------------------
+
+    def _hand_facts(
+        self, state: BalatroGameState, raw_g: Optional[Dict[str, Any]] = None
+    ) -> HandFacts:
+        hands_data = (raw_g or {}).get("hands", {})
+        jokers = _jokers_from(raw_g)
+        profile = self.analyzer.analyze(jokers)
+        needed = max(0, state.target_chips - state.current_chips)
+
+        plays = annotate_play_options(
+            enumerate_play_cores(state.hand),
+            hands_data,
+            jokers,
+            hands_left=state.hands_left,
+            discards_left=state.discards_left,
+        )
+        discards: List[DiscardPlan] = []
+        if state.discards_left > 0:
+            discards = enumerate_discard_plans(
+                state.hand,
+                favored_suits=profile.favored_suits,
+                favored_face_cards=profile.favored_face_cards,
+            )
+
+        summary = profile.summary if profile.has_synergies else ""
+        notes = self._resource_notes(profile)
+        play_context = self._context(
+            hand_brief(
+                state.ante, state.blind_name, needed, state.hands_left, state.discards_left,
+                state.hand, jokers, plays, summary, notes,
+            ),
+            raw_g,
+        )
+        discard_context = self._context(
+            discard_brief(
+                state.ante, state.blind_name, needed, state.hands_left, state.discards_left,
+                state.hand, discards, summary, notes,
+            ),
+            raw_g,
+        )
+        return HandFacts(needed, plays, discards, jokers, profile, play_context, discard_context)
+
+    @staticmethod
+    def _resource_notes(profile: SynergyProfile) -> List[str]:
+        """Board-level consequences the joker text implies, stated as facts.
+
+        A joker that pays for each unused discard makes discarding cost score --
+        true of the whole turn rather than of any one option, so it belongs in the
+        brief. Whether that is worth it is still the model's call.
         """
+        notes = []
+        if "discard" in profile.resource_bonuses:
+            notes.append("Your jokers pay for each unused discard, so discarding lowers your score.")
+        if "hand" in profile.resource_bonuses:
+            notes.append("Your jokers pay for each unused hand.")
+        return notes
+
+    def _play_criteria(self, facts: HandFacts, state: BalatroGameState,
+                       options: Sequence[PlayOption]) -> Dict[str, str]:
+        criteria = {}
+        for opt in options:
+            label = opt.label(facts.needed, state.hands_left)
+            synergy = self.analyzer.annotate_hand(facts.profile, opt.core, opt.hand_type)
+            criteria[opt.key] = f"{label}; {synergy}" if synergy else label
+        return criteria
+
+    def decide_hand_action(
+        self, state: BalatroGameState, raw_g: Optional[Dict[str, Any]] = None
+    ) -> AgentAction:
         if not state.hand:
             return AgentAction("PLAY", [], "No cards in hand", 0.0)
 
+        facts = self._hand_facts(state, raw_g)
+        if not facts.plays:
+            return AgentAction("PLAY", [], "No legal play", 0.0)
+
         if self.tree_mode:
-            return self._decide_hand_action_tree(state, raw_g)
+            return self._hand_tree(state, facts)
+        return self._hand_flat(state, facts)
 
+    def _hand_flat(self, state: BalatroGameState, facts: HandFacts) -> AgentAction:
+        """One question holding every legal move.
 
-        hands_data = raw_g.get("hands", {}) if raw_g else {}
-        needed_chips = max(0, state.target_chips - state.current_chips)
-
-        candidates = {}  # action_key -> (action_type, cards, description)
-
-        # 1. Enumerate distinct multi-card poker hands
-        seen_hand_types = set()
-        for size in (5, 4, 3, 2):
-            for combo in itertools.combinations(state.hand, size):
-                h_type, scoring = PokerEvaluator.identify_hand(list(combo))
-                if h_type not in seen_hand_types and h_type != "High Card":
-                    seen_hand_types.add(h_type)
-                    h_info = hands_data.get(h_type, {})
-                    lvl = h_info.get("level", 1)
-                    default_c, default_m = DEFAULT_HAND_SCORES.get(h_type, (10, 2))
-                    base_c = h_info.get("chips", default_c)
-                    base_m = h_info.get("mult", default_m)
-                    card_chips = sum(c.chip_value for c in combo)
-                    est_pts = (base_c + card_chips) * base_m
-                    cards_str = ", ".join(f"{c.rank}{c.suit[0]}" for c in combo)
-                    key = f"play_{h_type.lower().replace(' ', '_')}"
-                    status = "WINNING PLAY!" if est_pts >= needed_chips else f"yields ~{est_pts} pts"
-                    desc = f"Play {h_type} [{cards_str}] (Level {lvl}: {status}, needed: {needed_chips})"
-                    candidates[key] = ("PLAY", list(combo), desc)
-
-        # 2. Add High Card (1 card: highest rank or lowest rank)
-        sorted_by_val = sorted(state.hand, key=lambda c: c.value)
-        highest_card = sorted_by_val[-1]
-        h_info = hands_data.get("High Card", {})
-        lvl = h_info.get("level", 1)
-        base_c = h_info.get("chips", 5)
-        base_m = h_info.get("mult", 1)
-        hc_pts = (base_c + highest_card.chip_value) * base_m
-        candidates["play_high_card"] = (
-            "PLAY",
-            [highest_card],
-            f"Play High Card [{highest_card.rank}{highest_card.suit[0]}] (Level {lvl}: ~{hc_pts} pts)",
-        )
-
-        if len(state.hand) > 1 and state.discards_left == 0:
-            lowest_card = sorted_by_val[0]
-            candidates["play_single_low"] = (
-                "PLAY",
-                [lowest_card],
-                f"Play single card [{lowest_card.rank}{lowest_card.suit[0]}] as High Card to preserve remaining cards",
-            )
-
-        # 3. Enumerate discard options if discards are available
-        if state.discards_left > 0:
-            # A. Discard off-suit cards if 3+ of same suit (Flush digging)
-            suit_counts = Counter(c.suit for c in state.hand)
-            most_common_suit, count = suit_counts.most_common(1)[0]
-            if 3 <= count < 5:
-                offsuits = [c for c in state.hand if c.suit != most_common_suit][:5]
-                off_str = ", ".join(f"{c.rank}{c.suit[0]}" for c in offsuits)
-                candidates["discard_offsuit"] = (
-                    "DISCARD",
-                    offsuits,
-                    f"Discard {len(offsuits)} non-{most_common_suit} cards [{off_str}] to dig for the 5th {most_common_suit} for an 800+ pt Flush",
-                )
-
-            # B. Discard lowest unaligned cards
-            num_discard = min(len(state.hand), 4)
-            low_discard = sorted_by_val[:num_discard]
-            low_str = ", ".join(f"{c.rank}{c.suit[0]}" for c in low_discard)
-            candidates["discard_lowest"] = (
-                "DISCARD",
-                low_discard,
-                f"Discard {len(low_discard)} lowest cards [{low_str}] to dig for stronger hands or synergies",
-            )
-
-        # Build Laya criteria
-        criteria = {k: desc for k, (_, _, desc) in candidates.items()}
-        gamestate_text = self._render_state(raw_g, state)
-
-        questions = {
-            "hand_action": {
-                "type": "choice",
-                "instructions": (
-                    "You are playing Balatro. Strategic rules: "
-                    "1. Always prioritize playing winning 5-card hands (Flush, Full House, Straight) if they beat or heavily damage the target chips. "
-                    "2. If current hands are weak (high card or low pair) and target chips are high, prioritize discarding off-suit or low cards to dig for a Flush or synergy. "
-                    "3. Select the single best strategic action."
-                ),
-                "criteria": criteria,
-            }
-        }
-
-        try:
-            chosen_key = self.backend.predict_choice(
-                gamestate_text[:self._get_max_chars()],
-                "hand_action",
-                (
-                    "You are playing Balatro. Strategic rules: "
-                    "1. Always prioritize playing winning 5-card hands (Flush, Full House, Straight) if they beat or heavily damage the target chips. "
-                    "2. If current hands are weak (high card or low pair) and target chips are high, prioritize discarding off-suit or low cards to dig for a Flush or synergy. "
-                    "3. Select the single best strategic action."
-                ),
-                criteria,
-            )
-            if chosen_key in candidates:
-                act_type, cards, desc = candidates[chosen_key]
-                return AgentAction(
-                    action_type=act_type,
-                    cards=cards,
-                    reasoning=f"Decision: {desc}",
-                    confidence=0.90,
-                )
-        except Exception:
-            pass
-
-        first_key = next(iter(candidates))
-        act_type, cards, desc = candidates[first_key]
-        return AgentAction(act_type, cards, f"Defaulting to {desc}", 0.8)
-
-    def _decide_hand_action_tree(self, state: BalatroGameState, raw_g: Optional[Dict[str, Any]] = None) -> AgentAction:
-        """Hierarchical decision tree:
-        Stage 1: Intent (PLAY vs DISCARD).
-        Stage 2A: Hand selection (if PLAY).
-        Stage 2B: Discard selection (if DISCARD).
+        This is the baseline the tree is measured against. It deliberately does not
+        trim the option list: the cardinality is the thing being measured, and a
+        decision model's accuracy falling away as options multiply is a result, not
+        a bug to hide.
         """
-        hands_data = raw_g.get("hands", {}) if raw_g else {}
-        needed_chips = max(0, state.target_chips - state.current_chips)
+        criteria = self._play_criteria(facts, state, facts.plays)
+        by_key: Dict[str, Any] = {opt.key: opt for opt in facts.plays}
+        for plan in facts.discards:
+            key = f"discard_{plan.key}"
+            criteria[key] = plan.label(state.discards_left)
+            by_key[key] = plan
 
-        # 1. Enumerate playable multi-card hands
-        play_candidates: Dict[str, Tuple[List[Card], str, int]] = {}
-        seen_hand_types = set()
-        for size in (5, 4, 3, 2):
-            for combo in itertools.combinations(state.hand, size):
-                h_type, _ = PokerEvaluator.identify_hand(list(combo))
-                if h_type not in seen_hand_types and h_type != "High Card":
-                    seen_hand_types.add(h_type)
-                    h_info = hands_data.get(h_type, {})
-                    lvl = h_info.get("level", 1)
-                    default_c, default_m = DEFAULT_HAND_SCORES.get(h_type, (10, 2))
-                    base_c = h_info.get("chips", default_c)
-                    base_m = h_info.get("mult", default_m)
-                    card_chips = sum(c.chip_value for c in combo)
-                    est_pts = (base_c + card_chips) * base_m
-                    cards_str = ", ".join(f"{c.rank}{c.suit[0]}" for c in combo)
-                    key = f"play_{h_type.lower().replace(' ', '_')}"
-                    status = "WINNING PLAY!" if est_pts >= needed_chips else f"yields ~{est_pts} pts"
-                    desc = f"Play {h_type} [{cards_str}] (Level {lvl}: {status}, needed: {needed_chips})"
-                    play_candidates[key] = (list(combo), desc, est_pts)
-
-        # High card options
-        sorted_by_val = sorted(state.hand, key=lambda c: c.value)
-        highest_card = sorted_by_val[-1]
-        h_info = hands_data.get("High Card", {})
-        lvl = h_info.get("level", 1)
-        base_c = h_info.get("chips", 5)
-        base_m = h_info.get("mult", 1)
-        hc_pts = (base_c + highest_card.chip_value) * base_m
-        play_candidates["play_high_card"] = (
-            [highest_card],
-            f"Play High Card [{highest_card.rank}{highest_card.suit[0]}] (Level {lvl}: ~{hc_pts} pts)",
-            hc_pts,
+        choice = self._choose(
+            facts.play_context,
+            "hand_action",
+            "Which move should the player make now?",
+            criteria,
         )
+        if choice is None:
+            return self._fallback_play(facts)
 
-        if len(state.hand) > 1 and state.discards_left == 0:
-            lowest_card = sorted_by_val[0]
-            play_candidates["play_single_low"] = (
-                [lowest_card],
-                f"Play single card [{lowest_card.rank}{lowest_card.suit[0]}] as High Card to preserve remaining cards",
-                base_c + lowest_card.chip_value,
-            )
+        target = by_key[choice]
+        if isinstance(target, DiscardPlan):
+            return AgentAction("DISCARD", list(target.discard),
+                               f"Decision: discard — {target.label(state.discards_left)}", 0.9)
+        return AgentAction("PLAY", list(target.cards),
+                           f"Decision: play — {target.label(facts.needed, state.hands_left)}", 0.9)
 
-        # 2. Enumerate discard options
-        discard_candidates: Dict[str, Tuple[List[Card], str]] = {}
-        if state.discards_left > 0:
-            suit_counts = Counter(c.suit for c in state.hand)
-            most_common_suit, count = suit_counts.most_common(1)[0]
-            if 3 <= count < 5:
-                offsuits = [c for c in state.hand if c.suit != most_common_suit][:5]
-                off_str = ", ".join(f"{c.rank}{c.suit[0]}" for c in offsuits)
-                discard_candidates["discard_offsuit"] = (
-                    offsuits,
-                    f"Discard {len(offsuits)} non-{most_common_suit} cards [{off_str}] to dig for the 5th {most_common_suit} for an 800+ pt Flush",
-                )
+    def _hand_tree(self, state: BalatroGameState, facts: HandFacts) -> AgentAction:
+        """Hierarchical version: a few small questions instead of one wide one.
 
-            num_discard = min(len(state.hand), 4)
-            low_discard = sorted_by_val[:num_discard]
-            low_str = ", ".join(f"{c.rank}{c.suit[0]}" for c in low_discard)
-            discard_candidates["discard_lowest"] = (
-                low_discard,
-                f"Discard {len(low_discard)} lowest cards [{low_str}] to dig for stronger hands or synergies",
-            )
-
-        best_play_key = max(play_candidates, key=lambda k: play_candidates[k][2])
-        best_play_cards, best_play_desc, best_play_pts = play_candidates[best_play_key]
-        has_winning_hand = best_play_pts >= needed_chips
-
-        # Stage 1: Macro Intent (PLAY vs DISCARD)
-        # Always query Laya directly whenever discards are available — no Python heuristic overrides.
-        chosen_intent = "intent_play"
-        if state.discards_left > 0 and discard_candidates:
-            intent_criteria = {
-                "intent_play": f"PLAY: Play a hand now (Best available hand: {best_play_desc})",
-                "intent_discard": f"DISCARD: Discard cards to dig through deck for better cards (Discards left: {state.discards_left})",
-            }
-            macro_context = (
-                f"# Round Status: Ante {state.ante} ({state.blind_name})\n"
-                f"- Needed chips: {needed_chips} | Current: {state.current_chips} / {state.target_chips}\n"
-                f"- Hands left: {state.hands_left} | Discards left: {state.discards_left}\n"
-                f"- Best available hand: {best_play_desc}\n"
-            )
-            try:
-                chosen_intent = self.backend.predict_choice(
-                    macro_context,
-                    "macro_intent",
-                    (
-                        "Strategic rule: If you hold a winning hand or strong combo, choose PLAY. "
-                        "If current hands are weak and discards are available, choose DISCARD to dig through the deck."
-                    ),
-                    intent_criteria,
-                )
-            except Exception:
-                chosen_intent = "intent_play"
-
-
-
-        # Stage 2A: Play
-        if chosen_intent != "intent_discard":
-            if len(play_candidates) == 1:
-                return AgentAction("PLAY", best_play_cards, f"Tree Decision: {best_play_desc}", 0.95)
-
-            sorted_plays = sorted(play_candidates.items(), key=lambda kv: kv[1][2], reverse=True)
-            top_plays = dict(sorted_plays[:4])
-            play_criteria = {k: desc for k, (_, desc, _) in top_plays.items()}
-            gamestate_text = self._render_state(raw_g, state)
-
-            try:
-                chosen_play = self.backend.predict_choice(
-                    gamestate_text[:self._get_max_chars()],
-                    "play_hand",
-                    "Choose the single best poker hand to play from the candidate options to maximize scoring and beat the blind.",
-                    play_criteria,
-                )
-                if chosen_play in top_plays:
-                    cards, desc, _ = top_plays[chosen_play]
-                    return AgentAction("PLAY", cards, f"Tree Decision (Play): {desc}", 0.95)
-            except Exception:
-                pass
-            return AgentAction("PLAY", best_play_cards, f"Tree Fallback: {best_play_desc}", 0.90)
-
-        # Stage 2B: Discard
-        else:
-            if len(discard_candidates) == 1:
-                k = next(iter(discard_candidates))
-                cards, desc = discard_candidates[k]
-                return AgentAction("DISCARD", cards, f"Tree Decision: {desc}", 0.95)
-
-            discard_criteria = {k: desc for k, (_, desc) in discard_candidates.items()}
-            gamestate_text = self._render_state(raw_g, state)
-            try:
-                chosen_discard = self.backend.predict_choice(
-                    gamestate_text[:self._get_max_chars()],
-                    "discard_hand",
-                    "Choose which cards to discard to best improve the remaining hand.",
-                    discard_criteria,
-                )
-                if chosen_discard in discard_candidates:
-                    cards, desc = discard_candidates[chosen_discard]
-                    return AgentAction("DISCARD", cards, f"Tree Decision (Discard): {desc}", 0.95)
-            except Exception:
-                pass
-            first_k = next(iter(discard_candidates))
-            cards, desc = discard_candidates[first_k]
-            return AgentAction("DISCARD", cards, f"Tree Fallback: {desc}", 0.90)
-
-    def _decide_shop_action_tree(
-        self,
-        state: BalatroGameState,
-        shop_items: List[Dict[str, Any]],
-        max_jokers: int = 5,
-        raw_g: Optional[Dict[str, Any]] = None,
-    ) -> Optional[Tuple[str, int, str]]:
-        """Hierarchical decision tree for shop actions:
-        Stage 1: Category Intent (Buy Joker vs Buy Pack vs Buy Voucher vs Save Money).
-        Stage 2: Item Selection within chosen category.
-        Stage 3: Slot Management (if buying joker and slots are full).
+        Node 1  dig?         yes/no -- discard and draw, or play a hand now
+        Node 2a which hand?  one question when the options fit, otherwise
+                             hand type first, then which hand of that type
+        Node 2b which plan?  one of the named discard patterns
+        Node 3  send filler? yes/no -- only when the chosen hand is under five cards
         """
-        if state.money < 1 or not shop_items:
-            return None
-
-        val_j = raw_g.get("jokers") if raw_g else None
-        if isinstance(val_j, dict):
-            current_jokers = val_j.get("cards", [])
-        elif isinstance(val_j, list):
-            current_jokers = val_j
-        else:
-            current_jokers = []
-        can_hold_joker = len(current_jokers) < max_jokers
-
-        joker_items = []
-        pack_items = []
-        voucher_items = []
-        other_items = []
-
-        for idx, item in enumerate(shop_items):
-            cost = item.get("cost", 4)
-            if cost > state.money:
-                continue
-            name = (item.get("name") or item.get("label") or "").lower()
-            set_type = (item.get("set") or "").upper()
-            if "voucher" in name or set_type == "VOUCHER":
-                voucher_items.append((idx, item))
-            elif "pack" in name or set_type == "BOOSTER":
-                pack_items.append((idx, item))
-            elif any(w in name for w in ["planet", "tarot", "spectral"]) or set_type in ("PLANET", "TAROT", "SPECTRAL"):
-                other_items.append((idx, item))
-            else:
-                joker_items.append((idx, item))
-
-        has_sellable = any(
-            isinstance(j, dict) and not (isinstance(j.get("modifier"), dict) and j.get("modifier").get("eternal"))
-            for j in current_jokers
-        )
-        eligible_for_joker = can_hold_joker or (has_sellable and joker_items)
-
-        # Stage 1: Categories
-        categories = {}
-        if joker_items and eligible_for_joker:
-            categories["cat_joker"] = f"Buy a Joker (Available: {len(joker_items)} affordable jokers, Current slots: {len(current_jokers)}/{max_jokers})"
-        if pack_items:
-            categories["cat_pack"] = f"Buy a Booster Pack (Available: {len(pack_items)} affordable packs)"
-        if voucher_items:
-            categories["cat_voucher"] = f"Buy a permanent Voucher upgrade (Available: {len(voucher_items)})"
-        if other_items:
-            categories["cat_consumable"] = f"Buy Consumable item (Available: {len(other_items)})"
-        categories["cat_save"] = f"End shop and save money (Bank: ${state.money}, earns $1 interest per $5 held up to $25)"
-
-        if len(categories) <= 1:
-            return None
-
-        cat_context = (
-            f"# Shop Decisions - Ante {state.ante}\n"
-            f"- Money: ${state.money}\n"
-            f"- Joker slots: {len(current_jokers)}/{max_jokers}\n"
-            f"- Current jokers: {', '.join(j.get('label') or j.get('key', '') for j in current_jokers if isinstance(j, dict))}\n"
-        )
-
-        chosen_cat = "cat_save"
-        try:
-            chosen_cat = self.backend.predict_choice(
-                cat_context,
-                "shop_category",
-                (
-                    "You are at the Balatro shop. Decide whether to purchase a Joker, Booster Pack, Voucher, or save money towards interest. "
-                    "Prioritize building powerful Joker synergies in early-mid game. Save money if offerings are weak."
-                ),
-                categories,
+        if facts.discards and state.discards_left > 0:
+            dig = self._ask_bool(
+                facts.play_context,
+                "dig_for_better_hand",
+                "Should the player throw cards away and draw new ones instead of playing a hand now?",
+                "throw cards away now and draw replacements",
+                "play one of the hands listed above now",
+                on_failure=False,
             )
-        except Exception:
-            return None
+            if dig:
+                return self._tree_discard(state, facts)
 
-        if chosen_cat == "cat_save":
-            return None
+        return self._tree_play(state, facts)
 
-        # Stage 2: Item Selection within chosen category
-        target_list = []
-        if chosen_cat == "cat_joker":
-            target_list = joker_items
-        elif chosen_cat == "cat_pack":
-            target_list = pack_items
-        elif chosen_cat == "cat_voucher":
-            target_list = voucher_items
+    def _tree_play(self, state: BalatroGameState, facts: HandFacts) -> AgentAction:
+        options = facts.plays
+        if len(options) == 1:
+            return self._finish_play(state, facts, options[0], "only legal hand")
+
+        chosen: Optional[PlayOption]
+        if len(options) <= MAX_OPTIONS_PER_QUESTION:
+            criteria = self._play_criteria(facts, state, options)
+            key = self._pick(
+                facts.play_context, "which_hand",
+                "Which hand should the player play?", criteria,
+                statement_for=lambda _key, label: f"The player should play {label}",
+            )
+            chosen = next((o for o in options if o.key == key), None)
         else:
-            target_list = other_items
+            chosen = self._narrow_by_hand_type(state, facts, options)
 
-        if not target_list:
+        if chosen is None:
+            return self._fallback_play(facts)
+        return self._finish_play(state, facts, chosen, "chosen")
+
+    def _narrow_by_hand_type(
+        self, state: BalatroGameState, facts: HandFacts, options: Sequence[PlayOption]
+    ) -> Optional[PlayOption]:
+        """Two-step coarse-to-fine choice, the split the Laya model card recommends.
+
+        The grouping is by poker hand type -- a property of the cards, not a
+        judgement about which group is better.
+        """
+        groups: Dict[str, List[PlayOption]] = {}
+        for opt in options:
+            groups.setdefault(opt.hand_type, []).append(opt)
+
+        type_criteria = {}
+        for hand_type, members in groups.items():
+            key = _slug(hand_type)
+            sample = members[0].label(facts.needed, state.hands_left)
+            extra = f" ({len(members)} to choose from)" if len(members) > 1 else ""
+            type_criteria[key] = f"{sample}{extra}"
+
+        chosen_type = self._choose(facts.play_context, "which_hand_type",
+                                   "Which kind of poker hand should the player play?",
+                                   type_criteria)
+        if chosen_type is None:
             return None
 
-        chosen_idx, chosen_item = target_list[0]
-        if len(target_list) > 1:
-            item_criteria = {}
-            for idx, it in target_list:
-                it_name = it.get("name") or it.get("label") or "Item"
-                it_cost = it.get("cost", 4)
-                val_obj = it.get("value") if isinstance(it.get("value"), dict) else {}
-                it_eff = it.get("effect") or val_obj.get("effect") or ""
-                eff_desc = f" ({it_eff})" if it_eff else ""
-                item_criteria[f"item_{idx}"] = f"Buy '{it_name}' (${it_cost}){eff_desc}"
-
-            gamestate_text = self._render_state(raw_g, state)
-            try:
-                chosen_key = self.backend.predict_choice(
-                    gamestate_text[:self._get_max_chars()],
-                    "select_shop_item",
-                    "Select the best item in this category to purchase for your deck.",
-                    item_criteria,
-                )
-                if chosen_key.startswith("item_"):
-                    c_idx = int(chosen_key.split("_")[1])
-                    for idx, it in target_list:
-                        if idx == c_idx:
-                            chosen_idx, chosen_item = idx, it
-                            break
-            except Exception:
-                pass
-
-        # Stage 3: Slot Replacement if buying a Joker with full 5/5 slots
-        # Query Laya directly to choose which existing joker to sell — no Python heuristics.
-        if chosen_cat == "cat_joker" and not can_hold_joker:
-            sell_criteria = {}
-            for idx, j in enumerate(current_jokers):
-                if not isinstance(j, dict):
-                    continue
-                mod = j.get("modifier")
-                if isinstance(mod, dict) and mod.get("eternal"):
-                    continue
-                j_name = j.get("label") or j.get("key", f"Joker #{idx}")
-                val_obj = j.get("value") if isinstance(j.get("value"), dict) else {}
-                j_eff = j.get("effect") or val_obj.get("effect") or ""
-                eff_desc = f" ({j_eff})" if j_eff else ""
-                cost_obj = j.get("cost")
-                sell_val = cost_obj.get("sell", 1) if isinstance(cost_obj, dict) else (cost_obj if isinstance(cost_obj, int) else 1)
-                sell_criteria[f"sell_{idx}"] = f"Sell '{j_name}' (+${sell_val}){eff_desc} to free a slot for '{chosen_item.get('name', 'Joker')}'"
-
-            sell_criteria["cancel_buy"] = f"Do not sell any joker (cancel purchasing '{chosen_item.get('name', 'Joker')}')"
-
-            gamestate_text = self._render_state(raw_g, state)
-            try:
-                chosen_sell = self.backend.predict_choice(
-                    gamestate_text[:self._get_max_chars()],
-                    "sell_joker_to_make_room",
-                    f"Your joker slots are full (5/5). Choose which existing joker to sell to make room for '{chosen_item.get('name', 'Joker')}', or cancel.",
-                    sell_criteria,
-                )
-                if chosen_sell.startswith("sell_"):
-                    s_idx = int(chosen_sell.split("_")[1])
-                    s_joker = current_jokers[s_idx]
-                    s_name = s_joker.get("label") or s_joker.get("key", f"Joker #{s_idx}")
-                    return ("SELL", s_idx, f"Tree Decision: Sell '{s_name}' to free slot for '{chosen_item.get('name', 'Joker')}'.")
-            except Exception:
-                pass
+        members = next((v for k, v in groups.items() if _slug(k) == chosen_type), [])
+        if not members:
             return None
+        if len(members) == 1:
+            return members[0]
 
+        criteria = self._play_criteria(facts, state, members)
+        key = self._pick(
+            facts.play_context, "which_hand_of_type",
+            "Which one of these should the player play?", criteria,
+            statement_for=lambda _key, label: f"The player should play {label}",
+        )
+        return next((o for o in members if o.key == key), None)
 
-        return ("BUY", chosen_idx, f"Tree Decision: Buy '{chosen_item.get('name', 'Item')}' from shop.")
+    def _finish_play(
+        self, state: BalatroGameState, facts: HandFacts, option: PlayOption, why: str
+    ) -> AgentAction:
+        """Optionally attaches non-scoring filler, then returns the move."""
+        spare = pick_filler(state.hand, option.core)
+        if spare and len(option.core) < 5:
+            cycle = self._ask_bool(
+                facts.play_context,
+                "send_filler_cards",
+                (
+                    f"The player will play {option.hand_type} "
+                    f"({' '.join(c.short for c in option.core)}). Should they also play "
+                    f"{len(spare)} spare cards ({' '.join(c.short for c in spare)}) that score "
+                    "nothing, to get them out of hand and draw replacements?"
+                ),
+                "yes, send the spare cards away too",
+                "no, play only the scoring cards and keep the rest",
+                on_failure=False,
+            )
+            if cycle:
+                option.filler = spare
+
+        label = option.label(facts.needed, state.hands_left)
+        return AgentAction("PLAY", list(option.cards), f"Tree ({why}): play {label}", 0.95)
+
+    def _tree_discard(self, state: BalatroGameState, facts: HandFacts) -> AgentAction:
+        plans = facts.discards
+        if len(plans) == 1:
+            plan = plans[0]
+            return AgentAction("DISCARD", list(plan.discard),
+                               f"Tree (only plan): {plan.label(state.discards_left)}", 0.95)
+
+        criteria = {p.key: p.label(state.discards_left) for p in plans}
+        key = self._pick(
+            facts.discard_context, "which_discard",
+            "Which cards should the player throw away?", criteria,
+            statement_for=lambda _key, label: f"The player should {label}",
+        )
+        plan = next((p for p in plans if p.key == key), None)
+        if plan is None:
+            fallback = plans[0]
+            return AgentAction("DISCARD", list(fallback.discard),
+                               f"FALLBACK (model gave no answer): {fallback.label(state.discards_left)}", 0.5)
+        return AgentAction("DISCARD", list(plan.discard),
+                           f"Tree: {plan.label(state.discards_left)}", 0.95)
+
+    def _fallback_play(self, facts: HandFacts) -> AgentAction:
+        """Used only when the backend could not answer at all.
+
+        Plays the first enumerated option. Enumeration order is the game's fixed
+        poker-hand ranking, so this is Python playing, not the model -- which is
+        exactly why it is labelled and counted.
+        """
+        option = facts.plays[0]
+        return AgentAction("PLAY", list(option.cards),
+                           f"FALLBACK (model gave no answer): play {option.hand_type}", 0.5)
+
+    # ------------------------------------------------------------------
+    # Shop decisions
+    # ------------------------------------------------------------------
 
     def decide_shop_action(
         self,
@@ -570,177 +496,249 @@ class BalatroAgent:
         max_jokers: int = 5,
         raw_g: Optional[Dict[str, Any]] = None,
     ) -> Optional[Tuple[str, int, str]]:
-        """
-        Presents all available shop purchases and joker sales to Laya.
-        Laya directly decides what to buy, sell, or whether to save money.
-        """
-        if state.money < 1:
+        """Returns ("BUY"|"SELL", index, reasoning), or None to leave the shop."""
+        if state.money < 1 or not shop_items:
+            return None
+
+        jokers = _jokers_from(raw_g)
+        profile = self.analyzer.analyze(jokers)
+        slots = f"{len(jokers)}/{max_jokers}"
+        interest = min(state.money // 5, 5)
+        context = self._context(
+            shop_brief(state.ante, state.money, jokers, slots,
+                       profile.summary if profile.has_synergies else "", interest),
+            raw_g,
+        )
+
+        groups = self._group_shop_items(shop_items, state.money)
+        affordable = [entry for bucket in groups.values() for entry in bucket]
+        if not affordable:
             return None
 
         if self.tree_mode:
-            return self._decide_shop_action_tree(state, shop_items, max_jokers, raw_g)
-
-
-        candidates = {}  # action_key -> (action_type, index, description)
-
-        val_j = raw_g.get("jokers") if raw_g else None
-        if isinstance(val_j, dict):
-            current_jokers = val_j.get("cards", [])
-        elif isinstance(val_j, list):
-            current_jokers = val_j
+            picked = self._shop_tree(context, state, groups, jokers, max_jokers, profile, interest)
         else:
-            current_jokers = []
-        can_hold_joker = len(current_jokers) < max_jokers
+            picked = self._shop_flat(context, state, affordable, profile, interest)
 
-        # 1. Affordable items
-        for idx, item in enumerate(shop_items):
-            cost = item.get("cost", 4)
-            if cost <= state.money:
-                name = item.get("name", "Item")
-                if can_hold_joker or any(w in name.lower() for w in ["voucher", "planet", "tarot", "pack", "reroll"]):
-                    candidates[f"buy_item_{idx}"] = (
-                        "BUY",
-                        idx,
-                        f"Buy '{name}' (${cost}) from shop",
-                    )
+        if picked is None:
+            return None
+        idx, item = picked
+        return self._buy_or_make_room(context, state, idx, item, jokers, max_jokers, profile)
 
-        # 2. Joker sales if slots are full
-        if not can_hold_joker and current_jokers:
-            for idx, j in enumerate(current_jokers):
-                if not isinstance(j, dict):
-                    continue
-                mod = j.get("modifier")
-                if isinstance(mod, dict) and mod.get("eternal"):
-                    continue
-                j_name = j.get("label") or j.get("key", f"Joker #{idx}")
-                cost_obj = j.get("cost")
-                sell_val = cost_obj.get("sell", 1) if isinstance(cost_obj, dict) else (cost_obj if isinstance(cost_obj, int) else 1)
-                candidates[f"sell_joker_{idx}"] = (
-                    "SELL",
-                    idx,
-                    f"Sell '{j_name}' to free a slot (+${sell_val}) for elite shop offerings",
-                )
-
-        # 3. Option to leave shop and earn interest
-        candidates["end_shop"] = (
-            "END",
-            -1,
-            f"End shop without buying (preserve ${state.money} bankroll for interest)",
-        )
-
-        criteria = {k: desc for k, (_, _, desc) in candidates.items()}
-        gamestate_text = self._render_state(raw_g, state)
-
-        questions = {
-            "shop_action": {
-                "type": "choice",
-                "instructions": (
-                    "You are playing Balatro. Review available shop items, money, and current jokers. "
-                    "If a powerful scaling/scoring joker is available, buy it (or sell a weak joker if slots are full). "
-                    "Otherwise save money towards $25 interest."
-                ),
-                "criteria": criteria,
-            }
+    def _group_shop_items(
+        self, shop_items: List[Dict[str, Any]], money: int
+    ) -> Dict[str, List[Tuple[int, Dict[str, Any]]]]:
+        groups: Dict[str, List[Tuple[int, Dict[str, Any]]]] = {
+            "joker": [], "pack": [], "voucher": [], "consumable": [],
         }
+        for idx, item in enumerate(shop_items):
+            if _cost_of(item, 4) > money:
+                continue
+            name = _name_of(item).lower()
+            set_type = str(item.get("set") or "").upper()
+            if "voucher" in name or set_type == "VOUCHER":
+                groups["voucher"].append((idx, item))
+            elif "pack" in name or "booster" in name or set_type == "BOOSTER":
+                groups["pack"].append((idx, item))
+            elif any(w in name for w in ("planet", "tarot", "spectral")) or set_type in ("PLANET", "TAROT", "SPECTRAL"):
+                groups["consumable"].append((idx, item))
+            else:
+                groups["joker"].append((idx, item))
+        return groups
 
-        try:
-            choice = self.backend.predict_choice(
-                gamestate_text[:self._get_max_chars()],
-                "shop_action",
-                (
-                    "You are playing Balatro. Review available shop items, money, and current jokers. "
-                    "If a powerful scaling/scoring joker is available, buy it (or sell a weak joker if slots are full). "
-                    "Otherwise save money towards $25 interest."
-                ),
-                criteria,
+    def _shop_item_label(self, item: Dict[str, Any], money: int, profile: SynergyProfile) -> str:
+        cost = _cost_of(item, 4)
+        name = _name_of(item)
+        effect = _effect_of(item)
+        share = cost * 100 // money if money > 0 else 100
+        budget = "cheap" if share <= 40 else ("most of your money" if share >= 80 else "affordable")
+        synergy = self.analyzer.annotate_shop_item(profile, effect, name)
+        label = f"{name} ${cost} ({budget})"
+        if effect:
+            label += f": {effect}"
+        return label + synergy
+
+    def _shop_flat(
+        self,
+        context: str,
+        state: BalatroGameState,
+        entries: List[Tuple[int, Dict[str, Any]]],
+        profile: SynergyProfile,
+        interest: int,
+    ) -> Optional[Tuple[int, Dict[str, Any]]]:
+        criteria = {
+            f"buy{idx}_{_slug(_name_of(item))}": self._shop_item_label(item, state.money, profile)
+            for idx, item in entries
+        }
+        criteria["leave_shop"] = f"buy nothing and keep ${state.money} (earns ${interest} interest)"
+        choice = self._choose(context, "shop_action", "What should the player buy?", criteria)
+        if choice is None or choice == "leave_shop":
+            return None
+        return self._entry_for_key(choice, entries)
+
+    def _shop_tree(
+        self,
+        context: str,
+        state: BalatroGameState,
+        groups: Dict[str, List[Tuple[int, Dict[str, Any]]]],
+        jokers: List[Dict[str, Any]],
+        max_jokers: int,
+        profile: SynergyProfile,
+        interest: int,
+    ) -> Optional[Tuple[int, Dict[str, Any]]]:
+        categories: Dict[str, str] = {}
+        sellable = any(not _is_eternal(j) for j in jokers)
+        for name, entries in groups.items():
+            if not entries:
+                continue
+            if name == "joker" and len(jokers) >= max_jokers and not sellable:
+                continue
+            cheapest = min(_cost_of(it, 4) for _, it in entries)
+            label = {
+                "joker": f"a Joker ({len(entries)} on offer, from ${cheapest}, slots {len(jokers)}/{max_jokers})",
+                "pack": f"a Booster Pack ({len(entries)} on offer, from ${cheapest})",
+                "voucher": f"a permanent Voucher upgrade ({len(entries)} on offer, from ${cheapest})",
+                "consumable": f"a Tarot or Planet card ({len(entries)} on offer, from ${cheapest})",
+            }[name]
+            categories[f"cat_{name}"] = label
+        if not categories:
+            return None
+        categories["cat_save"] = f"nothing, keep ${state.money} (earns ${interest} interest)"
+
+        chosen = self._choose(context, "shop_category", "What should the player spend money on?", categories)
+        if chosen is None or chosen == "cat_save":
+            return None
+
+        entries = groups.get(chosen.replace("cat_", ""), [])
+        if not entries:
+            return None
+        if len(entries) == 1:
+            return entries[0]
+
+        criteria = {
+            f"buy{idx}_{_slug(_name_of(item))}": self._shop_item_label(item, state.money, profile)
+            for idx, item in entries
+        }
+        pick = self._choose(context, "which_shop_item", "Which one should the player buy?", criteria)
+        if pick is None:
+            return None
+        return self._entry_for_key(pick, entries)
+
+    @staticmethod
+    def _entry_for_key(
+        key: str, entries: List[Tuple[int, Dict[str, Any]]]
+    ) -> Optional[Tuple[int, Dict[str, Any]]]:
+        match = re.match(r"buy(\d+)_", key)
+        if not match:
+            return None
+        wanted = int(match.group(1))
+        return next(((i, it) for i, it in entries if i == wanted), None)
+
+    def _buy_or_make_room(
+        self,
+        context: str,
+        state: BalatroGameState,
+        idx: int,
+        item: Dict[str, Any],
+        jokers: List[Dict[str, Any]],
+        max_jokers: int,
+        profile: SynergyProfile,
+    ) -> Optional[Tuple[str, int, str]]:
+        """Buys the chosen item, asking which joker to sell first if slots are full."""
+        name = _name_of(item)
+        set_type = str(item.get("set") or "").upper()
+        looks_like_joker = not any(
+            w in name.lower() for w in ("voucher", "pack", "booster", "planet", "tarot", "spectral")
+        ) and set_type not in ("VOUCHER", "BOOSTER", "PLANET", "TAROT", "SPECTRAL")
+
+        if not looks_like_joker or len(jokers) < max_jokers:
+            return ("BUY", idx, f"Decision: buy '{name}'")
+
+        criteria = {}
+        for j_idx, joker in enumerate(jokers):
+            if _is_eternal(joker):
+                continue
+            j_name = _name_of(joker, f"Joker #{j_idx}")
+            lost = self.analyzer.joker_contribution(profile, j_name, _effect_of(joker))
+            criteria[f"sell{j_idx}_{_slug(j_name)}"] = (
+                f"sell {j_name} for ${_sell_value(joker)}, losing {lost}"
             )
-            if choice in candidates and choice != "end_shop":
-                act_type, target_idx, desc = candidates[choice]
-                return (act_type, target_idx, f"Decision: {desc}")
-        except Exception:
-            pass
+        if not criteria:
+            return None
+        criteria["keep_all_jokers"] = f"keep all jokers and do not buy '{name}'"
 
-        return None
+        choice = self._choose(
+            context, "sell_joker_for_room",
+            f"Joker slots are full. Which joker should go to make room for '{name}'?",
+            criteria,
+        )
+        if choice is None or choice == "keep_all_jokers":
+            return None
+        match = re.match(r"sell(\d+)_", choice)
+        if not match:
+            return None
+        s_idx = int(match.group(1))
+        s_name = _name_of(jokers[s_idx], f"Joker #{s_idx}")
+        return ("SELL", s_idx, f"Decision: sell '{s_name}' to make room for '{name}'")
 
-    def decide_blind_action(self, state: BalatroGameState, raw_g: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
-        """
-        Presents blind play vs skip options to Laya. Laya selects whether to play or skip.
-        """
+    # ------------------------------------------------------------------
+    # Blind, pack, consumable and joker-order decisions
+    # ------------------------------------------------------------------
+
+    def decide_blind_action(
+        self, state: BalatroGameState, raw_g: Optional[Dict[str, Any]] = None
+    ) -> Tuple[str, str]:
         if not raw_g:
             return ("SELECT", "Playing blind.")
 
-        blinds = raw_g.get("blinds", {})
-        current_blind_info = None
-        current_type = None
-
-        for b_key in ("small", "big", "boss"):
-            b_info = blinds.get(b_key)
-            if not isinstance(b_info, dict):
+        blinds = raw_g.get("blinds", {}) if isinstance(raw_g.get("blinds"), dict) else {}
+        info, kind = None, None
+        for key in ("small", "big", "boss"):
+            b = blinds.get(key)
+            if not isinstance(b, dict):
                 continue
-            st = str(b_info.get("status", "")).upper()
-            if st in ("SELECT", "SELECTING", "CURRENT", "ACTIVE") or b_info.get("selected"):
-                current_blind_info = b_info
-                current_type = b_key.upper()
+            status = str(b.get("status", "")).upper()
+            if status in ("SELECT", "SELECTING", "CURRENT", "ACTIVE") or b.get("selected"):
+                info, kind = b, key.upper()
                 break
-
-        if not current_blind_info:
-            for b_key in ("small", "big", "boss"):
-                b_info = blinds.get(b_key)
-                if not isinstance(b_info, dict):
-                    continue
-                st = str(b_info.get("status", "")).upper()
-                if st not in ("DEFEATED", "SKIPPED"):
-                    current_blind_info = b_info
-                    current_type = b_key.upper()
+        if info is None:
+            for key in ("small", "big", "boss"):
+                b = blinds.get(key)
+                if isinstance(b, dict) and str(b.get("status", "")).upper() not in ("DEFEATED", "SKIPPED"):
+                    info, kind = b, key.upper()
                     break
-
-        if not current_blind_info:
+        if info is None:
             return ("SELECT", "Playing blind (blind info unavailable).")
 
-        current_type = current_type or "SMALL"
+        kind = kind or "SMALL"
+        if kind == "BOSS":
+            boss = info.get("name") or "Boss Blind"
+            return ("SELECT", f"Playing {boss} (Boss blinds cannot be skipped).")
 
-        if current_type == "BOSS":
-            boss_name = current_blind_info.get("name") or "Boss Blind"
-            return ("SELECT", f"Playing {boss_name} (Boss blinds cannot be skipped).")
+        blind_name = info.get("name") or f"{kind.capitalize()} Blind"
+        tag_name = info.get("tag_name") or info.get("tag") or ""
+        tag_effect = info.get("tag_effect") or ""
+        if not tag_name:
+            return ("SELECT", f"Playing {blind_name} (no tag offered for skipping).")
 
-        blind_name = current_blind_info.get("name") or f"{current_type.capitalize()} Blind"
-        tag_name = current_blind_info.get("tag_name") or current_blind_info.get("tag") or "Tag"
-        tag_desc = current_blind_info.get("tag_effect") or ""
-
-        candidates = {
-            "play_blind": f"Play {blind_name} to earn cash payout and visit shop",
-            "skip_blind": f"Skip {blind_name} for Tag bonus: '{tag_name}' ({tag_desc})",
-        }
-
-        gamestate_text = self._render_state(raw_g, state)
-        questions = {
-            "blind_action": {
-                "type": "choice",
-                "instructions": (
-                    "Decide whether to play this blind for round payout and shop access, or skip for the tag reward. "
-                    "Only skip if tag offers game-changing value (Negative, Polychrome, Free shop items)."
-                ),
-                "criteria": candidates,
-            }
-        }
-
-        try:
-            res = self.backend.predict_choice(
-                gamestate_text[:self._get_max_chars()],
-                "blind_action",
-                (
-                    "Decide whether to play this blind for round payout and shop access, or skip for the tag reward. "
-                    "Only skip if tag offers game-changing value (Negative, Polychrome, Free shop items)."
-                ),
-                candidates,
-            )
-            if res == "skip_blind":
-                return ("SKIP", f"Skipping {blind_name} for Tag: {tag_name}")
-            return ("SELECT", f"Playing {blind_name} for cash and shop.")
-        except Exception:
-            pass
-
-        return ("SELECT", f"Laya Decision: Playing {blind_name} for round reward and shop access.")
+        jokers = _jokers_from(raw_g)
+        context = self._context(
+            blind_brief(state.ante, blind_name,
+                        info.get("chips") or info.get("score") or state.target_chips,
+                        state.money, jokers, tag_name, tag_effect),
+            raw_g,
+        )
+        skip = self._ask_bool(
+            context,
+            "skip_blind",
+            f"Should the player skip {blind_name} to take the tag '{tag_name}' instead of playing for cash?",
+            f"skip and take '{tag_name}'",
+            f"play {blind_name} for the cash payout and the shop",
+            on_failure=False,
+        )
+        if skip:
+            return ("SKIP", f"Decision: skip {blind_name} for tag '{tag_name}'")
+        return ("SELECT", f"Decision: play {blind_name} for cash and shop.")
 
     def decide_pack_card(
         self,
@@ -750,47 +748,44 @@ class BalatroAgent:
         max_jokers: int = 5,
         raw_g: Optional[Dict[str, Any]] = None,
     ) -> Optional[Tuple[int, Optional[List[int]], str]]:
-        """Presents all cards in booster pack to Laya to pick the best card."""
         if not pack_cards:
             return None
 
-        candidates = {}
-        for idx, c in enumerate(pack_cards):
-            name = c.get("label") or c.get("key", f"Card #{idx}")
-            set_type = c.get("set", "CARD")
-            candidates[f"card_{idx}"] = f"Select {set_type} '{name}'"
+        jokers = _jokers_from(raw_g)
+        profile = self.analyzer.analyze(jokers)
+        criteria = {}
+        for idx, card in enumerate(pack_cards):
+            name = _name_of(card, f"Card #{idx}")
+            effect = _effect_of(card)
+            set_type = str(card.get("set") or "CARD").title()
+            synergy = self.analyzer.annotate_shop_item(profile, effect, name)
+            label = f"{set_type} {name}" + (f": {effect}" if effect else "")
+            criteria[f"take{idx}_{_slug(name)}"] = label + synergy
+        criteria["skip_pack"] = "take nothing from this pack"
 
-        candidates["skip_pack"] = "Skip booster pack without selecting any card"
+        context = self._context(
+            "Balatro booster pack. " + ("Jokers: " + ", ".join(
+                _name_of(j) for j in jokers) if jokers else "Jokers: none"),
+            raw_g,
+        )
+        choice = self._choose(context, "pack_choice", "Which card should the player take?", criteria)
+        if choice is None or choice == "skip_pack":
+            return None
 
-        gamestate_text = self._render_state(raw_g)
-        questions = {
-            "pack_choice": {
-                "type": "choice",
-                "instructions": "Evaluate the booster pack offerings and select the card that best improves the current deck and jokers.",
-                "criteria": candidates,
-            }
-        }
-
-        try:
-            choice = self.backend.predict_choice(
-                gamestate_text[:self._get_max_chars()],
-                "pack_choice",
-                "Evaluate the booster pack offerings and select the card that best improves the current deck and jokers.",
-                candidates,
-            )
-            if choice.startswith("card_"):
-                chosen_idx = int(choice.split("_")[1])
-                chosen_card = pack_cards[chosen_idx]
-                card_name = chosen_card.get("label") or chosen_card.get("key", "")
-                return (chosen_idx, None, f"Decision: Selected '{card_name}' from pack.")
-        except Exception:
-            pass
-
-        return (0, None, f"Selected '{pack_cards[0].get('label', 'card')}'")
+        match = re.match(r"take(\d+)_", choice)
+        if not match:
+            return None
+        idx = int(match.group(1))
+        card = pack_cards[idx]
+        name = _name_of(card, "card")
+        targets = None
+        if self.consumable_requires_hand(card) and hand:
+            targets = self.decide_tarot_targets(name, hand=hand, raw_g=raw_g, effect=_effect_of(card))
+        return (idx, targets, f"Decision: take '{name}' from pack")
 
     @staticmethod
     def consumable_requires_hand(c: Dict[str, Any]) -> bool:
-        """Determines if a consumable card targets cards in hand (requiring SELECTING_HAND state)."""
+        """Whether a consumable needs cards highlighted in hand before it can be used."""
         set_type = (c.get("set") or "").upper()
         if set_type == "PLANET":
             return False
@@ -799,17 +794,16 @@ class BalatroAgent:
         non_hand_names = {
             "hermit", "the hermit", "fool", "the fool", "temperance",
             "judgement", "the judgement", "wheel of fortune", "the wheel of fortune",
-            "emperor", "the emperor", "high priestess", "the high priestess"
+            "emperor", "the emperor", "high priestess", "the high priestess",
         }
         if any(nh in name for nh in non_hand_names):
             return False
 
-        val_obj = c.get("value", {}) if isinstance(c, dict) else {}
-        eff = (val_obj.get("effect") or "").lower() if isinstance(val_obj, dict) else ""
-        if eff:
-            if re.search(r"select(?:ed)?\s+(\d+\s+)?cards?|\bconvert\b|\bdestroy\b|\benhance\b", eff):
+        effect = _effect_of(c).lower()
+        if effect:
+            if re.search(r"select(?:ed)?\s+(\d+\s+)?cards?|\bconvert\b|\bdestroy\b|\benhance\b", effect):
                 return True
-            if any(k in eff for k in ["money", "cash", "joker", "copy", "edition", "creates up to"]):
+            if any(k in effect for k in ["money", "cash", "joker", "copy", "edition", "creates up to"]):
                 return False
 
         return set_type == "TAROT"
@@ -821,96 +815,68 @@ class BalatroAgent:
         raw_g: Optional[Dict[str, Any]] = None,
         effect: str = "",
     ) -> Optional[List[int]]:
-        """Queries Laya directly to choose which card(s) in hand to target with a Tarot card.
-        Determines target requirements dynamically from card effect text without hardcoded name lists.
+        """Asks which card(s) in hand a Tarot should be applied to.
+
+        How many targets the card takes is read from its own effect text, so no
+        hardcoded list of Tarot names is needed.
         """
         if not hand:
             return None
 
-        eff_lower = (effect or "").lower()
-        t_name_lower = tarot_name.lower()
-
-        # Check if this card targets hand cards based on effect text or card description
-        # In Balatro, targeting cards state "selected card" or "selected cards"
-        if eff_lower:
-            target_match = re.search(r"(?:select(?:ed)?\s+(?:up\s+to\s+)?(\d+)\s+cards?|(\d+)\s+(?:up\s+to\s+)?(?:selected\s+)?cards?)", eff_lower)
-            if target_match:
-                max_targets = int(target_match.group(1) or target_match.group(2))
-            elif "selected card" in eff_lower or "select 1 card" in eff_lower:
+        eff = (effect or "").lower()
+        if eff:
+            match = re.search(
+                r"(?:select(?:ed)?\s+(?:up\s+to\s+)?(\d+)\s+cards?|(\d+)\s+(?:up\s+to\s+)?(?:selected\s+)?cards?)",
+                eff,
+            )
+            if match:
+                max_targets = int(match.group(1) or match.group(2))
+            elif "selected card" in eff or "select 1 card" in eff:
                 max_targets = 1
-            elif any(k in eff_lower for k in ["convert", "destroy", "enhance", "enhances"]):
-                max_targets = 2 if ("2" in eff_lower or "two" in eff_lower) else 1
+            elif any(k in eff for k in ("convert", "destroy", "enhance", "enhances")):
+                max_targets = 2 if ("2" in eff or "two" in eff) else 1
             else:
                 return None
-
         else:
-            # If no effect text was provided, detect self-targeting tarots (money/joker tarots)
-            # which never target playing cards in hand
-            non_targeting_keywords = ["money", "cash", "joker", "copy", "edition"]
-            if any(k in t_name_lower for k in non_targeting_keywords):
+            if any(k in tarot_name.lower() for k in ("money", "cash", "joker", "copy", "edition")):
                 return None
             max_targets = 1
 
-        candidates = {}
-        for idx, c in enumerate(hand):
-            r = getattr(c, "rank", "?")
-            s = getattr(c, "suit", "?")
-            candidates[f"card_{idx}"] = f"Target {r} of {s} (index {idx})"
-
-        if not candidates:
+        criteria = {
+            f"card{idx}_{_slug(getattr(c, 'rank', '?'))}": (
+                f"the {getattr(c, 'rank', '?')} of {getattr(c, 'suit', '?')}"
+            )
+            for idx, c in enumerate(hand)
+        }
+        if not criteria:
             return None
 
-        gamestate_text = self._render_state(raw_g)
-        questions = {
-            "tarot_target": {
-                "type": "choice",
-                "instructions": (
-                    f"You are applying Tarot card '{tarot_name}'. "
-                    "Select the single best card in hand to enhance, convert, or destroy based on your strategy."
-                ),
-                "criteria": candidates,
-            }
-        }
+        context = self._context(
+            f"Balatro. Applying '{tarot_name}'" + (f" ({effect})" if effect else "")
+            + ". Cards in hand: " + " ".join(getattr(c, "short", "?") for c in hand),
+            raw_g,
+        )
 
-        try:
-            choice = self.backend.predict_choice(
-                gamestate_text[:self._get_max_chars()],
-                "tarot_target",
-                f"You are applying Tarot card '{tarot_name}'. Select the single best card in hand to enhance, convert, or destroy based on your strategy.",
-                candidates,
+        picked: List[int] = []
+        remaining = dict(criteria)
+        for slot in range(max(1, max_targets)):
+            if not remaining:
+                break
+            choice = self._choose(
+                context,
+                f"tarot_target_{slot + 1}",
+                f"Which card should '{tarot_name}' be used on?",
+                remaining,
             )
-            if choice.startswith("card_"):
-                chosen_idx = int(choice.split("_")[1])
-                if max_targets >= 2 and len(hand) >= 2:
-                    if self.tree_mode:
-                        remaining_candidates = {
-                            k: desc
-                            for k, desc in candidates.items()
-                            if k != f"card_{chosen_idx}"
-                        }
-                        if remaining_candidates:
-                            try:
-                                choice2 = self.backend.predict_choice(
-                                    gamestate_text[:self._get_max_chars()],
-                                    "tarot_target_2",
-                                    f"Select the second card in hand to target with '{tarot_name}'.",
-                                    remaining_candidates,
-                                )
-                                if choice2.startswith("card_"):
-                                    c2 = int(choice2.split("_")[1])
-                                    return [chosen_idx, c2]
-                            except Exception:
-                                pass
-                    c1 = 1 if chosen_idx != 1 else 0
-                    return [chosen_idx, c1]
-                return [chosen_idx]
-        except Exception:
-            pass
+            if choice is None:
+                break
+            match = re.match(r"card(\d+)_", choice)
+            if not match:
+                break
+            picked.append(int(match.group(1)))
+            remaining.pop(choice, None)
 
-
-        if max_targets >= 2 and len(hand) >= 2:
-            return [0, 1]
-        return [0]
+        return picked or None
 
     def decide_consumable_action(
         self,
@@ -918,123 +884,79 @@ class BalatroAgent:
         hand: Optional[List[Any]] = None,
         raw_g: Optional[Dict[str, Any]] = None,
     ) -> Optional[Tuple[int, Optional[List[int]], str]]:
-        """Presents consumables in inventory to Laya to decide if and when to use them."""
         if not consumables:
             return None
 
-        current_state = (raw_g.get("state") or "") if raw_g else ""
-        is_selecting_hand = (current_state == "SELECTING_HAND")
-
-        candidates = {}
-        for idx, c in enumerate(consumables):
-            if not is_selecting_hand and self.consumable_requires_hand(c):
+        is_selecting_hand = ((raw_g or {}).get("state") or "") == "SELECTING_HAND"
+        criteria = {}
+        for idx, card in enumerate(consumables):
+            if not is_selecting_hand and self.consumable_requires_hand(card):
                 continue
-            name = c.get("label") or c.get("key", f"Consumable #{idx}")
-            set_type = c.get("set", "CONSUMABLE")
-            val_obj = c.get("value", {}) if isinstance(c, dict) else {}
-            eff = val_obj.get("effect", "") if isinstance(val_obj, dict) else ""
-            eff_desc = f" ({eff})" if eff else ""
-            candidates[f"use_{idx}"] = f"Use {set_type} '{name}'{eff_desc} immediately to level up hand or gain bonus"
+            name = _name_of(card, f"Consumable #{idx}")
+            effect = _effect_of(card)
+            set_type = str(card.get("set") or "CONSUMABLE").title()
+            criteria[f"use{idx}_{_slug(name)}"] = f"use {set_type} {name}" + (f": {effect}" if effect else "")
+        if not criteria:
+            return None
+        criteria["keep_all"] = "keep them for later"
 
-        candidates["keep_all"] = "Keep all consumables in inventory for later"
+        jokers = _jokers_from(raw_g)
+        context = self._context(
+            "Balatro. Deciding whether to use a consumable now.\n"
+            + ("Jokers: " + ", ".join(_name_of(j) for j in jokers) if jokers else "Jokers: none"),
+            raw_g,
+        )
+        choice = self._choose(context, "consumable_action",
+                              "Should the player use a consumable now, and which one?", criteria)
+        if choice is None or choice == "keep_all":
+            return None
 
-        gamestate_text = self._render_state(raw_g)
-        questions = {
-            "consumable_action": {
-                "type": "choice",
-                "instructions": "Determine whether to use an available consumable card now or hold it in inventory. Using planets or money tarot immediately is usually optimal.",
-                "criteria": candidates,
-            }
-        }
+        match = re.match(r"use(\d+)_", choice)
+        if not match:
+            return None
+        idx = int(match.group(1))
+        card = consumables[idx]
+        name = _name_of(card, "consumable")
+        targets = self.decide_tarot_targets(name, hand=hand, raw_g=raw_g, effect=_effect_of(card))
+        return (idx, targets, f"Decision: use '{name}' (targets={targets})")
 
-        try:
-            choice = self.backend.predict_choice(
-                gamestate_text[:self._get_max_chars()],
-                "consumable_action",
-                "Determine whether to use an available consumable card now or hold it in inventory. Using planets or money tarot immediately is usually optimal.",
-                candidates,
-            )
-            if choice.startswith("use_"):
-                idx = int(choice.split("_")[1])
-                name = consumables[idx].get("label") or consumables[idx].get("key", "")
-                val_obj = consumables[idx].get("value", {}) if isinstance(consumables[idx], dict) else {}
-                eff = val_obj.get("effect", "") if isinstance(val_obj, dict) else ""
-                targets = self.decide_tarot_targets(name, hand=hand, raw_g=raw_g, effect=eff)
-                return (idx, targets, f"Decision: {candidates[choice]} (targets={targets})")
-        except Exception:
-            pass
+    def decide_joker_order(
+        self, current_jokers: List[Dict[str, Any]], raw_g: Optional[Dict[str, Any]] = None
+    ) -> Optional[List[int]]:
+        """Asks whether to reorder jokers so X-Mult triggers last.
 
-        return None
-
-    def decide_joker_order(self, current_jokers: List[Dict[str, Any]], raw_g: Optional[Dict[str, Any]] = None) -> Optional[List[int]]:
-        """Presents joker reordering options directly to Laya to decide the optimal trigger sequence.
-        Evaluates joker effects dynamically (phase 0: Chips/Utility, phase 1: Flat Mult, phase 2: X-Mult)
-        without any hardcoded joker names.
+        Balatro scores jokers left to right, so a flat +Mult applied after an
+        X-Mult is worth less. Python works out what that order would be; the model
+        decides whether to adopt it.
         """
         if len(current_jokers) <= 1:
             return None
 
-        indexed = []
-        for i, j in enumerate(current_jokers):
-            val_obj = j.get("value", {}) if isinstance(j, dict) else {}
-            effect = (val_obj.get("effect") or j.get("effect") or "").lower() if isinstance(val_obj, dict) else ""
-
-            # Classify scoring phase purely from effect mechanics:
-            # Multiplicative mult (X-Mult): "X3", "x1.5", "X Mult" -> triggers last
-            if re.search(r"\bx\s*\d+(\.\d+)?|\bx\s*mult\b|\bxmult\b", effect):
-                cat = 2
-            # Flat mult (+Mult): "+10 Mult", "gives +3 Mult" -> triggers middle
+        phases = []
+        for i, joker in enumerate(current_jokers):
+            effect = _effect_of(joker).lower()
+            if re.search(r"(?<![a-z])x\s*\d+(\.\d+)?|\bx\s*mult\b|\bxmult\b", effect):
+                phase = 2
             elif re.search(r"\b\+\s*\d+\s*mult\b|\bmult\b", effect):
-                cat = 1
-            # Chips or utility -> triggers first
+                phase = 1
             else:
-                cat = 0
-            indexed.append((cat, i))
+                phase = 0
+            phases.append((phase, i))
 
-        candidate_order = [idx for cat, idx in sorted(indexed, key=lambda x: x[0])]
-        if candidate_order == list(range(len(current_jokers))):
+        candidate = [i for _, i in sorted(phases, key=lambda x: x[0])]
+        if candidate == list(range(len(current_jokers))):
             return None
 
-        curr_names = [current_jokers[i].get("label") or current_jokers[i].get("key", f"Joker #{i}") for i in range(len(current_jokers))]
-        new_names = [current_jokers[i].get("label") or current_jokers[i].get("key", f"Joker #{i}") for i in candidate_order]
-
-        prompt_lines = [
-            "Balatro evaluates Jokers sequentially from left to right during scoring.",
-            "Rule: Chips and +Mult must trigger first, and X-Mult (multiplicative Mult) must trigger last on the far right to maximize score.",
-            "Current jokers:"
-        ]
-        for i, j in enumerate(current_jokers):
-            lbl = j.get("label") or j.get("key", f"Joker #{i}")
-            eff = (j.get("value", {}).get("effect") if isinstance(j.get("value"), dict) else j.get("effect")) or ""
-            prompt_lines.append(f"Position {i}: {lbl}" + (f" ({eff})" if eff else ""))
-
-        prompt_text = "\n".join(prompt_lines)
-
-        candidates = {
-            "order_original": f"Keep original order: {chr(44).join(curr_names)}",
-            "order_optimized": f"Order: {chr(44).join(new_names)} (positions +Chips/+Mult first, and X-Mult on far right to maximize score)",
+        names = [_name_of(j, f"Joker #{i}") for i, j in enumerate(current_jokers)]
+        criteria = {
+            "order_current": "keep them as they are: " + ", ".join(names),
+            "order_xmult_last": "move to: " + ", ".join(names[i] for i in candidate)
+            + " (chips and +Mult first, X-Mult last)",
         }
-
-        questions = {
-            "order": {
-                "type": "choice",
-                "instructions": "Select the optimal left-to-right arrangement of Jokers to maximize final score.",
-                "criteria": candidates,
-            }
-        }
-
-        try:
-            choice = self.backend.predict_choice(
-                prompt_text,
-                "order",
-                "Select the optimal left-to-right arrangement of Jokers to maximize final score.",
-                candidates,
-            )
-            if choice == "order_optimized":
-                return candidate_order
-            elif choice == "order_original":
-                return None
-        except Exception:
-            pass
-
-        return candidate_order
+        context = self._context(
+            "Balatro scores jokers left to right. Jokers now: "
+            + "; ".join(f"{n} ({_effect_of(j)})" for n, j in zip(names, current_jokers)),
+            raw_g,
+        )
+        choice = self._choose(context, "joker_order", "How should the jokers be ordered?", criteria)
+        return candidate if choice == "order_xmult_last" else None

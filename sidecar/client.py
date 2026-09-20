@@ -171,8 +171,8 @@ class BalatroBotClient:
         for b_key, b_info in blinds.items():
             if isinstance(b_info, dict):
                 status = b_info.get("status", "")
-                if status in ("SELECTING", "CURRENT", "ACTIVE") or b_info.get("selected"):
-                    target_chips = b_info.get("chips", 300)
+                if status in ("SELECT", "SELECTING", "CURRENT", "ACTIVE") or b_info.get("selected"):
+                    target_chips = b_info.get("chips") or b_info.get("score") or 300
                     blind_name = b_info.get("name", b_key.capitalize() + " Blind")
                     break
 
