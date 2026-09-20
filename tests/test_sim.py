@@ -79,6 +79,12 @@ class TestProbesRankAsExpected(unittest.TestCase):
         report = run_stress("label", "tree", range(5), max_ante=2)
         self.assertEqual(report.fallbacks, 0)
 
+    def test_no_probe_ever_produces_an_illegal_move(self):
+        for policy in ("label", "first", "random"):
+            for mode in ("tree", "flat"):
+                report = run_stress(policy, mode, range(10), max_ante=3)
+                self.assertEqual(report.illegal_moves, 0, f"{policy}/{mode}")
+
 
 if __name__ == "__main__":
     unittest.main()

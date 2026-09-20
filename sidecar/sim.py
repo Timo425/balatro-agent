@@ -95,6 +95,7 @@ class RoundResult:
     hands_used: int
     discards_used: int
     actions: List[str] = field(default_factory=list)
+    illegal: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -197,15 +198,25 @@ class BalatroSim:
             action: AgentAction = agent.decide_hand_action(state, raw_g=raw_g)
             chosen_ids = {c.id for c in action.cards}
             chosen = [c for c in hand if c.id in chosen_ids]
+
+            # The simulator refuses illegal moves rather than quietly repairing
+            # them: a repaired move would hide a bug in how options are built.
             if not chosen:
+                result.illegal.append("empty selection")
+                break
+            if len(chosen) > 5:
+                result.illegal.append(f"{len(chosen)} cards selected (max 5)")
+                break
+            if action.action_type == "DISCARD" and discards_left <= 0:
+                result.illegal.append("discard with no discards left")
                 break
 
-            if action.action_type == "DISCARD" and discards_left > 0:
+            if action.action_type == "DISCARD":
                 discards_left -= 1
                 result.discards_used += 1
                 result.actions.append(f"DISCARD {' '.join(c.short for c in chosen)}")
             else:
-                gained = self.score(chosen[:5], hands_left, discards_left)
+                gained = self.score(chosen, hands_left, discards_left)
                 chips += gained
                 hands_left -= 1
                 result.hands_used += 1

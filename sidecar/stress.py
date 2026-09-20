@@ -140,6 +140,10 @@ class StressReport:
     fallbacks: int = 0
 
     @property
+    def illegal_moves(self) -> int:
+        return sum(len(rnd.illegal) for run in self.runs for rnd in run.rounds)
+
+    @property
     def rounds_won(self) -> List[int]:
         return [r.rounds_won for r in self.runs]
 
@@ -162,7 +166,8 @@ class StressReport:
             f"rounds won: mean {statistics.mean(won):5.2f} max {max(won):2d} | "
             f"beat 1st blind {self.first_blind_clear_rate * 100:5.1f}% | "
             f"cleared Ante 1 {self.ante1_clear_rate * 100:5.1f}% | "
-            f"decisions {self.decisions:5d} fallbacks {self.fallbacks}"
+            f"decisions {self.decisions:5d} fallbacks {self.fallbacks} "
+            f"illegal {self.illegal_moves}"
         )
 
 
