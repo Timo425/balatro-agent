@@ -109,10 +109,13 @@ class BalatroBotClient:
             params["cards"] = target_cards
         return self.send_rpc("use", params)
 
-    def select_pack_card(self, card_idx: Optional[int] = None, skip: bool = False) -> Optional[Dict[str, Any]]:
+    def select_pack_card(self, card_idx: Optional[int] = None, targets: Optional[List[int]] = None, skip: bool = False) -> Optional[Dict[str, Any]]:
         if skip:
             return self.send_rpc("pack", {"skip": True})
-        return self.send_rpc("pack", {"card": card_idx or 0})
+        params: Dict[str, Any] = {"card": card_idx if card_idx is not None else 0}
+        if targets:
+            params["targets"] = targets
+        return self.send_rpc("pack", params)
 
     def start_game(self, deck: str = "RED", stake: str = "WHITE") -> Optional[Dict[str, Any]]:
         return self.send_rpc("start", {"deck": deck, "stake": stake})
@@ -133,7 +136,6 @@ class BalatroBotClient:
         raw_jokers = raw_g.get("jokers", {}).get("cards", [])
         jokers = [j.get("label") or j.get("key", "Joker") for j in raw_jokers]
 
-        # Determine current blind requirement
         blinds = raw_g.get("blinds", {})
         target_chips = 300
         blind_name = "Small Blind"

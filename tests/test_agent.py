@@ -8,7 +8,6 @@ class TestBalatroAgent(unittest.TestCase):
         cls.agent = BalatroAgent(rules_path="rules/balatro-strategy.md")
 
     def test_scenario_a_instant_win_flush(self):
-        """Scenario A: Hand contains an immediate winning Flush against Ante 1 Small Blind (300)."""
         hand = [
             Card("A", "Spades", 1),
             Card("K", "Spades", 2),
@@ -30,14 +29,12 @@ class TestBalatroAgent(unittest.TestCase):
             hand=hand,
             jokers=[]
         )
-
         action = self.agent.decide_hand_action(state)
         self.assertEqual(action.action_type, "PLAY")
         self.assertEqual(len(action.cards), 5)
         self.assertTrue(all(c.suit == "Spades" for c in action.cards))
 
     def test_scenario_b_flush_digging_discard(self):
-        """Scenario B: Weak hand against 800 chip blind, holding 4 Hearts with 3 discards remaining."""
         hand = [
             Card("K", "Hearts", 1),
             Card("10", "Hearts", 2),
@@ -59,24 +56,20 @@ class TestBalatroAgent(unittest.TestCase):
             hand=hand,
             jokers=[]
         )
-
         action = self.agent.decide_hand_action(state)
         self.assertEqual(action.action_type, "DISCARD")
         self.assertTrue(all(c.suit != "Hearts" for c in action.cards))
 
     def test_rule_joker_order(self):
-        """RULE_JOKER_ORDER: +Chips (Banner) left, +Flat Mult (Joker) mid, X-Mult (Cavendish) right."""
         jokers = [
-            {"label": "Cavendish", "key": "j_cavendish"},  # X-Mult (cat 3)
-            {"label": "Banner", "key": "j_banner"},        # Chips (cat 0)
-            {"label": "Half Joker", "key": "j_half"}       # Flat Mult (cat 1)
+            {"label": "Cavendish", "key": "j_cavendish"},
+            {"label": "Banner", "key": "j_banner"},
+            {"label": "Half Joker", "key": "j_half"}
         ]
         new_order = self.agent.decide_joker_order(jokers)
-        # Should reorder to Banner (idx 1) -> Half Joker (idx 2) -> Cavendish (idx 0)
         self.assertEqual(new_order, [1, 2, 0])
 
     def test_rule_use_planet(self):
-        """RULE_USE_PLANET: Planet card must be consumed immediately."""
         consumables = [
             {"label": "Jupiter", "key": "c_jupiter", "set": "PLANET"}
         ]
@@ -86,16 +79,29 @@ class TestBalatroAgent(unittest.TestCase):
         self.assertEqual(idx, 0)
         self.assertIn("Jupiter", reasoning)
 
-    def test_rule_pack_card_selection(self):
-        """RULE_SHOP_PRIORITY: Selects Jupiter for Flush from Celestial pack."""
+    def test_rule_pack_card_selection_planet(self):
         pack_cards = [
             {"label": "Mercury", "key": "c_mercury", "set": "PLANET"},
             {"label": "Jupiter", "key": "c_jupiter", "set": "PLANET"}
         ]
         decision = self.agent.decide_pack_card(pack_cards)
         self.assertIsNotNone(decision)
-        idx, reasoning = decision
+        idx, targets, reasoning = decision
+        self.assertEqual(idx, 0)  # Mercury is a planet, valid immediately without targets
+        self.assertIsNone(targets)
+
+    def test_rule_pack_card_death_with_hand(self):
+        pack_cards = [
+            {"label": "Death", "key": "c_death", "set": "TAROT"},
+            {"label": "Temperance", "key": "c_temperance", "set": "TAROT"}
+        ]
+        # In this pack, Temperance has priority 2 (no targets), while Death requires 2 targets.
+        # Temperance is preferred because it gives cash without risking hand targets
+        decision = self.agent.decide_pack_card(pack_cards)
+        self.assertIsNotNone(decision)
+        idx, targets, reasoning = decision
         self.assertEqual(idx, 1)
+        self.assertEqual(targets, None)
 
 if __name__ == "__main__":
     unittest.main()

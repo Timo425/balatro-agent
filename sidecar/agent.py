@@ -70,7 +70,7 @@ def classify_joker(name: str) -> int:
     for k in CHIP_JOKERS:
         if k in n:
             return 0
-    return 1  # Default to flat mult position
+    return 1
 
 class BalatroAgent:
     """Autonomous Balatro agent using living strategy rules and Laya neural decisions."""
@@ -87,7 +87,6 @@ class BalatroAgent:
         needed_chips = max(0, state.target_chips - state.current_chips)
 
         # Rule 1: RULE_INSTANT_WIN
-        # If top hand beats the blind, ALWAYS play immediately
         if top_hand.total_score >= needed_chips:
             return AgentAction(
                 action_type="PLAY",
@@ -96,7 +95,7 @@ class BalatroAgent:
                 confidence=1.0
             )
 
-        # Rule 2: RULE_FLUSH_DIG (from Section 1 of strategy rulebook)
+        # Rule 2: RULE_FLUSH_DIG
         if state.discards_left > 0:
             suit_counts = Counter(c.suit for c in state.hand)
             most_common_suit, count = suit_counts.most_common(1)[0]
@@ -109,7 +108,7 @@ class BalatroAgent:
                     confidence=0.98
                 )
 
-        # Rule 3: For ambiguous situations where discards remain, query Laya with rulebook context
+        # Rule 3: Discard fallback with Laya
         if state.discards_left > 0 and state.hands_left > 1:
             recommended_discards = PokerEvaluator.recommend_discards(state.hand)
             laya_state = {
@@ -161,22 +160,17 @@ class BalatroAgent:
         """
         Implements RULE_JOKER_ORDER:
         Arrange [+Chips] -> [+Flat Mult] -> [+Scaling Mult] -> [X-Mult].
-        Returns list of 0-based indices in the new order, or None if already optimal.
         """
         if len(current_jokers) <= 1:
             return None
 
-        # Sort indices by classified category
         indexed = []
         for i, j in enumerate(current_jokers):
             name = j.get("label") or j.get("key", "")
             cat = classify_joker(name)
             indexed.append((cat, i))
 
-        # Stable sort preserving relative order within categories
         sorted_indices = [idx for cat, idx in sorted(indexed, key=lambda x: x[0])]
-
-        # If already optimal, return None
         if sorted_indices == list(range(len(current_jokers))):
             return None
 
@@ -194,58 +188,105 @@ class BalatroAgent:
             set_type = c.get("set", "").upper()
             name = (c.get("label") or c.get("key", "")).lower()
 
-            # Rule: Planet cards are always consumed immediately to level up hand values
             if set_type == "PLANET" or any(p in name for p in ["jupiter", "pluto", "mars", "saturn", "earth", "mercury", "uranus", "venus", "neptune"]):
                 return (idx, f"RULE_USE_PLANET: Using planet card '{c.get('label') or name}' to level up poker hands.")
 
-            # Rule: The Hermit doubles money immediately
             if "hermit" in name:
                 return (idx, "RULE_USE_TAROT: Using The Hermit for instant economy boost.")
 
-            # Rule: The Fool duplicates last card
+            if "temperance" in name:
+                return (idx, "RULE_USE_TAROT: Using Temperance for instant cash boost.")
+
             if "fool" in name:
                 return (idx, "RULE_USE_TAROT: Using The Fool.")
 
         return None
 
-    def decide_pack_card(self, pack_cards: List[Dict[str, Any]]) -> Optional[Tuple[int, str]]:
+    def decide_pack_card(self, pack_cards: List[Dict[str, Any]], hand: Optional[List[Card]] = None, jokers_count: int = 0, max_jokers: int = 5) -> Optional[Tuple[int, Optional[List[int]], str]]:
         """
-        Evaluates opened booster pack cards and selects the best one.
-        Returns (0-based index, reasoning) or None to skip.
+        Evaluates opened booster pack cards and selects the best card with necessary target cards.
+        Returns (0-based card_idx, optional target_indices, reasoning) or None.
         """
         if not pack_cards:
             return None
 
-        # 1. Look for Planet cards (especially Jupiter for Flush or Saturn for Straight)
+        hand_cards = hand or []
+        n_hand = len(hand_cards)
+
+        # 1. Look for Planet cards (never require targets, always beneficial)
         for idx, c in enumerate(pack_cards):
             name = (c.get("label") or c.get("key", "")).lower()
-            if "jupiter" in name:
-                return (idx, f"Selected high-priority Flush planet 'Jupiter'.")
-            if any(p in name for p in ["saturn", "mars", "earth", "uranus"]):
-                return (idx, f"Selected planet card '{c.get('label', name)}'.")
+            set_type = c.get("set", "").upper()
+            if set_type == "PLANET" or any(p in name for p in ["jupiter", "pluto", "mars", "saturn", "earth", "uranus", "venus", "neptune"]):
+                return (idx, None, f"Selected planet card '{c.get('label', name)}' for permanent hand level up.")
 
-        # 2. Look for high-value Jokers or Tarots
+        # 2. Look for instant money / utility Tarots (NO TARGETS NEEDED)
         for idx, c in enumerate(pack_cards):
             name = (c.get("label") or c.get("key", "")).lower()
-            cat = classify_joker(name)
-            if cat in (2, 3):  # Scaling or X-mult
-                return (idx, f"Selected premium Joker '{c.get('label', name)}'.")
+            if "temperance" in name:
+                return (idx, None, "Selected 'Temperance' for immediate cash boost.")
+            if "hermit" in name:
+                return (idx, None, "Selected 'The Hermit' to double money.")
+            if "judgement" in name and jokers_count < max_jokers:
+                return (idx, None, "Selected 'Judgement' to spawn a free Joker.")
+            if "wheel of fortune" in name and jokers_count > 0:
+                return (idx, None, "Selected 'The Wheel of Fortune' to roll for Joker edition.")
+            if "fool" in name:
+                return (idx, None, "Selected 'The Fool' to duplicate last consumable.")
 
-        # Fallback: take the first card
-        return (0, f"Selected '{pack_cards[0].get('label', 'Card')}' from pack.")
+        # 3. Look for target-requiring Tarots if we have enough cards in hand
+        if n_hand >= 2:
+            # Sorted hand indices: worst (lowest chip) to best (highest chip)
+            hand_sorted_by_val = sorted(range(n_hand), key=lambda i: hand_cards[i].value)
+            worst_indices = hand_sorted_by_val[:2]
+            best_indices = hand_sorted_by_val[-2:]
+
+            for idx, c in enumerate(pack_cards):
+                name = (c.get("label") or c.get("key", "")).lower()
+                
+                # Death: transforms left card into copy of right card -> [worst_idx, best_idx]
+                if "death" in name:
+                    return (idx, [worst_indices[0], best_indices[-1]], f"Selected 'Death': transforming card #{worst_indices[0]} into copy of #{best_indices[-1]}.")
+
+                # The Hanged Man: destroys 2 selected cards
+                if "hanged man" in name:
+                    return (idx, worst_indices, f"Selected 'The Hanged Man': destroying low cards {worst_indices} to thin deck.")
+
+                # Suit converters: 3 off-suit cards
+                if any(s in name for s in ["the sun", "the moon", "the star", "the world"]):
+                    suit_targets = worst_indices[:min(3, n_hand)]
+                    return (idx, suit_targets, f"Selected suit converter '{c.get('label', name)}'.")
+
+                # Enhancements (Empress, Hierophant, Chariot, Magician)
+                if any(e in name for e in ["empress", "hierophant", "chariot", "magician", "lovers", "devil"]):
+                    enhance_targets = [best_indices[-1]]
+                    return (idx, enhance_targets, f"Selected enhancement '{c.get('label', name)}' on top card #{best_indices[-1]}.")
+
+        # 4. Check for Jokers (Buffoon pack)
+        for idx, c in enumerate(pack_cards):
+            set_type = c.get("set", "").upper()
+            if set_type == "JOKER" or "joker" in c.get("key", "").lower():
+                name = c.get("label") or c.get("key", "")
+                return (idx, None, f"Selected Joker '{name}' from Buffoon pack.")
+
+        # 5. Fallback: Find ANY card that does NOT require hand targets
+        # Cards that require targets: death, hanged man, sun, moon, star, world, empress, hierophant, chariot, magician, lovers, tower, devil, strength, justice
+        TARGET_REQUIRING = ["death", "hanged man", "sun", "moon", "star", "world", "empress", "hierophant", "chariot", "magician", "lovers", "tower", "devil", "strength", "justice"]
+        for idx, c in enumerate(pack_cards):
+            name = (c.get("label") or c.get("key", "")).lower()
+            if not any(t in name for t in TARGET_REQUIRING):
+                return (idx, None, f"Selected safe card '{c.get('label', name)}' requiring no hand targets.")
+
+        # If everything requires targets and we don't have enough hand cards, return None to skip
+        return None
 
     def decide_shop_action(self, state: BalatroGameState, shop_items: List[Dict[str, Any]], max_jokers: int = 5) -> Optional[Tuple[int, str]]:
-        """
-        Evaluates available shop items against strategy rules and Laya.
-        Returns (1-based index, reasoning) if an item should be bought, or None to end shop.
-        """
         if not shop_items or state.money < 3:
             return None
 
         jokers_count = len(state.jokers)
         can_hold_joker = jokers_count < max_jokers
 
-        # Identify affordable items
         affordable = []
         for idx, item in enumerate(shop_items):
             cost = item.get("cost", 4)
@@ -266,18 +307,15 @@ class BalatroAgent:
         for one_based_idx, item, cost in affordable:
             name = str(item.get("name", "")).lower()
             if can_hold_joker:
-                # Ante 1-3: aggressively build basic scoring base
                 if state.ante <= 3 or jokers_count < 2:
                     is_scoring = any(k in name for k in mult_keywords) or jokers_count == 0
                     if is_scoring:
                         return (one_based_idx, f"RULE_SHOP_PRIORITY: Buying '{item.get('name')}' (${cost}) to establish Mult/Chip foundation.")
                 else:
-                    # Mid/Late game: check if high tier or keeping interest reserve (RULE_INTEREST_RESERVE)
                     is_elite = any(k in name for k in scaling_keywords)
                     if is_elite or (state.money - cost >= 20):
                         return (one_based_idx, f"RULE_SHOP_PRIORITY: Acquiring scaling/utility Joker '{item.get('name')}' (${cost}).")
 
-        # If multiple affordable items and still deciding, consult Laya with rulebook context
         if affordable and can_hold_joker and state.money >= 6:
             cand_summary = [f"#{idx}: {item.get('name')} (${cost})" for idx, item, cost in affordable]
             laya_state = {
@@ -309,7 +347,6 @@ class BalatroAgent:
         return None
 
     def decide_shop_purchase(self, state: BalatroGameState, shop_jokers: List[str]) -> Optional[str]:
-        """Backward-compatible helper testing strategy rubric."""
         if not shop_jokers or state.money < 4:
             return 'save_money'
         if state.ante <= 3:

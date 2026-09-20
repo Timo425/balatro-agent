@@ -50,10 +50,8 @@ class BalatroLayaRunner:
         return False
 
     def handle_hand_decision(self, raw_g: dict):
-        # 1. First ensure Jokers are in optimal order for scoring
         self.check_joker_rearrange(raw_g)
 
-        # 2. Use any immediate consumables (like planet cards)
         if self.check_consumables(raw_g):
             return
 
@@ -83,11 +81,9 @@ class BalatroLayaRunner:
             self.client.discard_cards(card_indices)
 
     def handle_shop_decision(self, raw_g: dict):
-        # 1. Use any pending consumables
         if self.check_consumables(raw_g):
             return
 
-        # 2. Check Jokers rearrangement
         self.check_joker_rearrange(raw_g)
 
         shop_cards_raw = raw_g.get("shop", {}).get("cards", [])
@@ -96,7 +92,6 @@ class BalatroLayaRunner:
         max_jokers = raw_g.get("jokers", {}).get("max", 5)
         ante = raw_g.get("ante_num", 1)
 
-        # Normalize shop items format for the agent
         shop_items = []
         for c in shop_cards_raw:
             shop_items.append({
@@ -136,7 +131,7 @@ class BalatroLayaRunner:
             time.sleep(0.5)
             return
 
-        # 3. Check Booster packs if cash >= $25 or early Buffoon pack
+        # Check Booster packs
         packs_raw = raw_g.get("packs", {}).get("cards", [])
         if packs_raw and (dollars >= 25 or (ante <= 2 and len(current_jokers) < 2)):
             for p_idx, pack in enumerate(packs_raw):
@@ -148,7 +143,6 @@ class BalatroLayaRunner:
                     time.sleep(0.5)
                     return
 
-        # 4. If no more actions, proceed to next round
         console.print(f"[bold yellow]🚪 Shop Decision:[/bold yellow] Ending shop (bankroll preserved for interest).")
         console.print(f"[bold yellow]>> LEAVING SHOP (NEXT ROUND)[/bold yellow]")
         self.client.next_round()
@@ -162,6 +156,9 @@ class BalatroLayaRunner:
             self.client.select_pack_card(skip=True)
             return
 
+        state = self.client.parse_state(raw_g)
+        max_jokers = raw_g.get("jokers", {}).get("max", 5)
+
         table = Table(title="🎁 Booster Pack Contents", show_header=True)
         table.add_column("Idx", justify="center", style="cyan")
         table.add_column("Card", justify="left", style="magenta")
@@ -170,13 +167,23 @@ class BalatroLayaRunner:
             table.add_row(str(idx), c.get("label") or c.get("key", ""), c.get("set", ""))
         console.print(table)
 
-        decision = self.agent.decide_pack_card(pack_cards)
+        decision = self.agent.decide_pack_card(
+            pack_cards, 
+            hand=state.hand, 
+            jokers_count=len(state.jokers), 
+            max_jokers=max_jokers
+        )
+
         if decision is not None:
-            card_idx, reasoning = decision
-            console.print(f"[bold green]🎯 Pack Decision:[/bold green] {reasoning}")
-            self.client.select_pack_card(card_idx=card_idx)
+            card_idx, targets, reasoning = decision
+            console.print(f"[bold green]🎯 Pack Decision:[/bold green] {reasoning} (targets={targets})")
+            res = self.client.select_pack_card(card_idx=card_idx, targets=targets)
+            if res is None:
+                # If selection failed (e.g. invalid target count in game state), fallback to skip to avoid infinite loop
+                console.print("[yellow]⚠️ Pack selection returned error, skipping pack to continue game...[/yellow]")
+                self.client.select_pack_card(skip=True)
         else:
-            console.print("[yellow]Skipping pack...[/yellow]")
+            console.print("[yellow]No suitable card or targets, skipping pack...[/yellow]")
             self.client.select_pack_card(skip=True)
         time.sleep(0.5)
 
