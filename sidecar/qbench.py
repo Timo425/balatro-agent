@@ -236,10 +236,16 @@ def build_items(seeds: Sequence[int]) -> List[QItem]:
     return items
 
 
-def evaluate(backend: BaseBackend, items: Sequence[QItem]) -> Dict[Tuple[str, str], QResult]:
+def evaluate(backend: BaseBackend, items: Sequence[QItem],
+             binary: str = "noul") -> Dict[Tuple[str, str], QResult]:
     results: Dict[Tuple[str, str], QResult] = defaultdict(QResult)
     for item in items:
-        if item.qtype == "noul":
+        if item.qtype == "noul" and binary == "choice":
+            picked = backend.predict_choice(
+                item.context, item.kind, item.instructions,
+                {"yes": item.criteria.get("true", ""), "no": item.criteria.get("false", "")})
+            given = picked == "yes"
+        elif item.qtype == "noul":
             given = backend.predict_bool(item.context, item.kind, item.instructions,
                                          item.criteria.get("true", ""),
                                          item.criteria.get("false", ""))
@@ -269,6 +275,8 @@ def main() -> None:
     parser.add_argument("--backend", default="laya_tree",
                         choices=["laya", "laya_tree", "first", "random"])
     parser.add_argument("--seeds", type=int, default=40)
+    parser.add_argument("--binary", default="noul", choices=["noul", "choice"],
+                        help="How the yes/no items are asked")
     parser.add_argument("--json", default=None, help="Write the raw table to this path")
     args = parser.parse_args()
 
@@ -280,9 +288,9 @@ def main() -> None:
         from sidecar.backends import create_backend
         backend = create_backend(args.backend)
 
-    results = evaluate(backend, items)
+    results = evaluate(backend, items, binary=args.binary)
 
-    print(f"\n{args.backend} on {len(items)} items from {args.seeds} dealt hands\n")
+    print(f"\n{args.backend} (binary={args.binary}) on {len(items)} items from {args.seeds} dealt hands\n")
     print(f"{'question':<18} {'variant':<9} {'n':>4} {'accuracy':>9} {'chance':>7} "
           f"{'same answer':>12} {'confidence':>11} {'ECE':>6}")
     print("-" * 84)

@@ -31,6 +31,9 @@ class ScriptedBackend(BaseBackend):
         answer = self.answers.get(question_id)
         if callable(answer):
             answer = answer(criteria)
+        if isinstance(answer, bool) and set(criteria) == {"yes", "no"}:
+            # A yes/no node asked as a two-option choice; scripts stay boolean.
+            return "yes" if answer else "no"
         if answer in criteria:
             return answer
         return next(iter(criteria))

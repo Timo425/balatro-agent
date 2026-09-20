@@ -121,6 +121,7 @@ class BalatroAgent:
         model: Optional[str] = None,
         tree_mode: Optional[bool] = None,
         poll_mode: Optional[bool] = None,
+        binary_nodes: str = "noul",
         **backend_kwargs,
     ):
         self.rules_path = Path(rules_path)
@@ -141,6 +142,7 @@ class BalatroAgent:
         # the offline harness and costs one sequence per option, so `choice` is the
         # default node shape. See docs/findings.md.
         self.poll_mode = bool(poll_mode)
+        self.binary_nodes = binary_nodes
         self.analyzer = JokerSynergyAnalyzer()
 
     # ------------------------------------------------------------------
@@ -230,7 +232,20 @@ class BalatroAgent:
         false_desc: str,
         on_failure: bool,
     ) -> bool:
+        """A yes/no decision node.
+
+        `binary_nodes` picks the shape: a native yes/no question (`noul`), or a
+        two-option choice. They are the same decision worded two ways, and which
+        one a given model answers better is an empirical question -- see
+        docs/findings.md.
+        """
         try:
+            if self.binary_nodes == "choice":
+                answer = self.backend.predict_choice(
+                    context, question_id, statement,
+                    {"yes": true_desc, "no": false_desc},
+                )
+                return answer == "yes"
             return bool(self.backend.predict_bool(context, question_id, statement, true_desc, false_desc))
         except Exception:
             self.backend.note_fallback()

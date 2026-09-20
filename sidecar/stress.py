@@ -83,6 +83,9 @@ class ProbeBackend(BaseBackend):
         if question_id in ("shop_category", "which_shop_item", "shop_action", "pack_choice",
                            "consumable_action", "sell_joker_for_room", "joker_order"):
             return keys[0]
+        if set(keys) == {"yes", "no"}:
+            # The same decision asked as a two-option choice.
+            return "yes" if self._label_bool(self._last_context, question_id) else "no"
         if question_id == "which_discard":
             return self._best_discard(criteria, keys)
         if question_id == "hand_action":
@@ -263,6 +266,7 @@ def run_stress(
     shared_backend: bool = True,
     node: str = "choice",
     record: bool = False,
+    binary: str = "noul",
 ) -> StressReport:
     tree = mode == "tree"
     report = StressReport(policy=policy, mode=mode, node=node)
@@ -271,7 +275,8 @@ def run_stress(
         backend = RecordingBackend(backend)
     for seed in seeds:
         active = backend or build_backend(policy, seed, tree)
-        agent = BalatroAgent(backend=active, tree_mode=tree, poll_mode=(node == "poll" and tree))
+        agent = BalatroAgent(backend=active, tree_mode=tree,
+                             poll_mode=(node == "poll" and tree), binary_nodes=binary)
         sim = BalatroSim(seed=seed, jokers=jokers)
         run = sim.play_run(agent, max_ante=max_ante)
         report.runs.append(run)
@@ -294,6 +299,8 @@ def main() -> None:
     parser.add_argument("--mode", default="both", choices=["tree", "flat", "both"])
     parser.add_argument("--node", default="choice", choices=["choice", "poll"],
                         help="Tree node shape: one choice per node, or a batched yes/no poll")
+    parser.add_argument("--binary", default="noul", choices=["noul", "choice"],
+                        help="How yes/no nodes are asked: natively, or as a two-option choice")
     parser.add_argument("--seeds", type=int, default=20)
     parser.add_argument("--max-ante", type=int, default=3)
     parser.add_argument("--jokers", default="", help="Comma-separated keys from JOKER_LIBRARY")
@@ -311,7 +318,7 @@ def main() -> None:
     for mode in modes:
         report = run_stress(policy=args.policy, mode=mode, node=args.node,
                             seeds=range(args.seeds), jokers=jokers, max_ante=args.max_ante,
-                            record=bool(args.dump))
+                            record=bool(args.dump), binary=args.binary)
         print(report.summary())
         if args.dump:
             path = Path(args.dump)
