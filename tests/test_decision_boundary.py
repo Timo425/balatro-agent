@@ -210,3 +210,36 @@ class TestPlayPathStaysClean(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestConfidenceIsReportedNotObeyed(unittest.TestCase):
+    """A near-coin-flip answer is still the model's answer."""
+
+    def test_a_low_confidence_answer_is_carried_out(self):
+        backend = ScriptedBackend({"which_aim": "pair_8", "send_filler_cards": False})
+        backend.last_confidence = 0.02
+        agent = BalatroAgent(backend=backend, tree_mode=True, poll_mode=False)
+        action = agent.decide_hand_action(make_state(), raw_g={"hands": {}})
+        self.assertEqual({c.rank for c in action.cards}, {"8"})
+
+    def test_low_confidence_decisions_are_recorded(self):
+        backend = ScriptedBackend({"which_aim": "pair_8", "send_filler_cards": False})
+        backend.last_confidence = 0.02
+        agent = BalatroAgent(backend=backend, tree_mode=True, poll_mode=False)
+        agent.decide_hand_action(make_state(), raw_g={"hands": {}})
+        self.assertTrue(agent.low_confidence_decisions)
+        self.assertIn("which_aim", [q for q, _ in agent.low_confidence_decisions])
+
+    def test_a_confident_answer_is_not_flagged(self):
+        backend = ScriptedBackend({"which_aim": "pair_8", "send_filler_cards": False})
+        backend.last_confidence = 0.9
+        agent = BalatroAgent(backend=backend, tree_mode=True, poll_mode=False)
+        agent.decide_hand_action(make_state(), raw_g={"hands": {}})
+        self.assertFalse(agent.low_confidence_decisions)
+        self.assertEqual(agent.decision_confidence["which_aim"], 0.9)
+
+    def test_backends_without_confidence_are_not_flagged(self):
+        backend = ScriptedBackend({"which_aim": "pair_8", "send_filler_cards": False})
+        agent = BalatroAgent(backend=backend, tree_mode=True, poll_mode=False)
+        agent.decide_hand_action(make_state(), raw_g={"hands": {}})
+        self.assertFalse(agent.low_confidence_decisions)

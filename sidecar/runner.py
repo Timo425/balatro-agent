@@ -37,6 +37,7 @@ class BalatroLayaRunner:
         self.agent = self.client.agent
         self.last_state_name = None
         self._reported_fallbacks = 0
+        self._reported_guesses = 0
 
     def check_joker_rearrange(self, raw_g: dict):
         """Ensures RULE_JOKER_ORDER (+Chips -> +Flat Mult -> +Scaling -> X-Mult)."""
@@ -89,6 +90,14 @@ class BalatroLayaRunner:
 
         console.print(table)
         console.print(f"[bold cyan]Action:[/bold cyan] {action.action_type} | [bold cyan]Reasoning:[/bold cyan] {action.reasoning}")
+        guesses = getattr(self.agent, "low_confidence_decisions", [])
+        if len(guesses) > self._reported_guesses:
+            for question_id, confidence in guesses[self._reported_guesses:]:
+                console.print(
+                    f"[yellow]~ low confidence[/yellow] {question_id}: {confidence:.2f} "
+                    "(the model answered, but barely)"
+                )
+            self._reported_guesses = len(guesses)
         fallbacks = getattr(self.agent.backend, "fallbacks", 0)
         if fallbacks > self._reported_fallbacks:
             self._reported_fallbacks = fallbacks

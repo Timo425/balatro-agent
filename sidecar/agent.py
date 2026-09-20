@@ -143,6 +143,8 @@ class BalatroAgent:
         # default node shape. See docs/findings.md.
         self.poll_mode = bool(poll_mode)
         self.binary_nodes = binary_nodes
+        self.decision_confidence: Dict[str, float] = {}
+        self.low_confidence_decisions: List[Tuple[str, float]] = []
         self.analyzer = JokerSynergyAnalyzer()
 
     # ------------------------------------------------------------------
@@ -176,6 +178,10 @@ class BalatroAgent:
         limit = getattr(self.backend, "head_max_len", 192)
         return head_budget(instructions, criteria)["total"] <= limit - 16
 
+    #: A decision model reports how sure it is. Below this, its answer is close to
+    #: a coin flip -- still its answer, but worth saying out loud.
+    LOW_CONFIDENCE = 0.15
+
     def _choose(
         self,
         context: str,
@@ -191,9 +197,25 @@ class BalatroAgent:
         except Exception:
             choice = None
         if choice in criteria:
+            self._note_confidence(question_id)
             return choice
         self.backend.note_fallback()
         return None
+
+    def _note_confidence(self, question_id: str) -> None:
+        """Records questions the model answered with almost no conviction.
+
+        Guessing is not the same failure as not answering, and the two should not
+        look alike in a run's telemetry. The answer still stands -- Python does not
+        get to overrule a low-confidence answer -- but the run can be read knowing
+        which decisions were coin flips.
+        """
+        confidence = getattr(self.backend, "last_confidence", None)
+        if confidence is None:
+            return
+        self.decision_confidence[question_id] = float(confidence)
+        if float(confidence) < self.LOW_CONFIDENCE:
+            self.low_confidence_decisions.append((question_id, float(confidence)))
 
     def _poll(
         self,
@@ -255,8 +277,12 @@ class BalatroAgent:
                     context, question_id, statement,
                     {"yes": true_desc, "no": false_desc},
                 )
+                self._note_confidence(question_id)
                 return answer == "yes"
-            return bool(self.backend.predict_bool(context, question_id, statement, true_desc, false_desc))
+            answer_bool = bool(
+                self.backend.predict_bool(context, question_id, statement, true_desc, false_desc))
+            self._note_confidence(question_id)
+            return answer_bool
         except Exception:
             self.backend.note_fallback()
             return on_failure
