@@ -211,8 +211,18 @@ class BalatroLayaRunner:
             return True
 
         elif current_state == "BLIND_SELECT":
-            console.print("[bold cyan]Blind Selection:[/bold cyan] Selecting Blind...")
-            self.client.select_blind()
+            state = self.client.parse_state(raw_state)
+            action, reasoning = self.agent.decide_blind_action(state, raw_g=raw_state)
+            if action == "SKIP":
+                console.print(f"[bold yellow]⏩ Blind Skip Decision:[/bold yellow] {reasoning}")
+                res = self.client.skip_blind()
+                if res is None:
+                    console.print("[yellow]Skip unavailable, selecting blind instead...[/yellow]")
+                    self.client.select_blind()
+            else:
+                console.print(f"[bold cyan]Blind Selection:[/bold cyan] {reasoning}")
+                self.client.select_blind()
+            time.sleep(0.5)
             return True
 
         elif current_state == "ROUND_EVAL":

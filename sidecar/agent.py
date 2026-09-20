@@ -355,3 +355,70 @@ class BalatroAgent:
                 pass
 
         return None
+
+    def decide_blind_action(self, state: BalatroGameState, raw_g: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
+        """
+        Decides whether to play the current blind or skip it for a tag bonus.
+        Returns ("SELECT" or "SKIP", reasoning).
+        """
+        if not raw_g:
+            return ("SELECT", "Defaulting to play blind.")
+
+        blinds = raw_g.get("blinds", {})
+        current_blind_info = None
+        current_type = "SMALL"
+
+        for b_key, b_info in blinds.items():
+            if b_info.get("status") in ("SELECTING", "CURRENT", "ACTIVE") or b_info.get("selected"):
+                current_blind_info = b_info
+                current_type = b_key.upper()
+                break
+
+        # Cannot skip Boss blind
+        if current_type == "BOSS" or not current_blind_info:
+            return ("SELECT", "Playing Boss blind (cannot skip).")
+
+        tag_name = (current_blind_info.get("tag_name") or current_blind_info.get("tag") or "").lower()
+        tag_desc = current_blind_info.get("tag_effect") or ""
+
+        HIGH_VALUE_TAGS = [
+            "negative", "polychrome", "coupon", "economy", "investment",
+            "rare joker", "uncommon joker", "voucher", "d_six"
+        ]
+
+        is_high_value = any(t in tag_name for t in HIGH_VALUE_TAGS)
+
+        # Ante 1 rule: If no jokers, only skip for game-changing tags (negative, polychrome, coupon)
+        if state.ante == 1 and len(state.jokers) < 2:
+            if any(t in tag_name for t in ["negative", "polychrome", "coupon"]):
+                return ("SKIP", f"Skipping blind for elite Ante 1 Tag: '{tag_name}' ({tag_desc}).")
+            return ("SELECT", "Playing Ante 1 blind to earn shop visit and build scoring base.")
+
+        # Mid/Late game: If high value tag and deck has scoring engine
+        if is_high_value and len(state.jokers) >= 2:
+            # Consult Laya with gamestate
+            gamestate_repr = self.sm.render_gamestate(raw_g)
+            laya_state = {
+                "gamestate": gamestate_repr[:1500],
+                "tag_name": tag_name,
+                "tag_description": tag_desc
+            }
+            questions = {
+                "blind_decision": {
+                    "type": "choice",
+                    "instructions": "Determine whether to play blind for cash/shop or skip for tag reward.",
+                    "criteria": {
+                        "skip": "The tag bonus offers massive strategic value (e.g. Free items, Negative, Polychrome, High Cash).",
+                        "play": "Playing the blind is safer to maintain interest, shop visits, and deck upgrades."
+                    }
+                }
+            }
+            try:
+                res = self.agent.predict(laya_state, questions)
+                choice = res["answers"]["blind_decision"]["choice"]
+                if choice == "skip":
+                    return ("SKIP", f"Laya Decision: Skipping blind for high-value Tag '{tag_name}' ({tag_desc}).")
+            except Exception:
+                pass
+
+        return ("SELECT", f"Playing {current_type.capitalize()} Blind for round reward and shop access.")

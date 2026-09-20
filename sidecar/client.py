@@ -76,6 +76,9 @@ class BalatroBotClient:
     def get_gamestate(self) -> Optional[Dict[str, Any]]:
         return self.send_rpc("gamestate")
 
+    def skip_blind(self) -> Optional[Dict[str, Any]]:
+        return self.send_rpc("skip")
+
     def select_blind(self) -> Optional[Dict[str, Any]]:
         return self.send_rpc("select")
 
