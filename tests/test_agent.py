@@ -103,5 +103,30 @@ class TestBalatroAgent(unittest.TestCase):
         self.assertEqual(idx, 1)
         self.assertEqual(targets, None)
 
+    def test_rule_sell_joker_to_make_room_for_elite(self):
+        """When joker slots are full (5/5) and an elite X-Mult Joker (Cavendish) appears in shop, sell weakest!"""
+        state = BalatroGameState(
+            ante=4, blind_name="Small Blind", target_chips=5000, current_chips=0,
+            hands_left=4, discards_left=3, money=10, hand=[], jokers=["Joker", "Half Joker", "Popcorn", "Mystic Summit", "Banner"]
+        )
+        raw_g = {
+            "jokers": {
+                "count": 5, "max": 5,
+                "cards": [
+                    {"label": "Banner", "key": "j_banner", "cost": {"sell": 2}},
+                    {"label": "Joker", "key": "j_joker", "cost": {"sell": 1}},
+                    {"label": "Half Joker", "key": "j_half", "cost": {"sell": 2}},
+                    {"label": "Popcorn", "key": "j_popcorn", "cost": {"sell": 2}},
+                    {"label": "Mystic Summit", "key": "j_mystic", "cost": {"sell": 2}}
+                ]
+            }
+        }
+        shop_items = [{"name": "Cavendish", "cost": 5}]
+        decision = self.agent.decide_shop_action(state, shop_items, max_jokers=5, raw_g=raw_g)
+        self.assertIsNotNone(decision)
+        act_type, idx, reasoning = decision
+        self.assertEqual(act_type, "SELL")
+        self.assertIn("Cavendish", reasoning)
+
 if __name__ == "__main__":
     unittest.main()

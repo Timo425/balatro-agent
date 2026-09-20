@@ -88,6 +88,12 @@ class BalatroBotClient:
     def cash_out(self) -> Optional[Dict[str, Any]]:
         return self.send_rpc("cash_out")
 
+        def sell_joker(self, index: int) -> Optional[Dict[str, Any]]:
+        return self.send_rpc("sell", {"joker": index})
+
+    def sell_consumable(self, index: int) -> Optional[Dict[str, Any]]:
+        return self.send_rpc("sell", {"consumable": index})
+
     def buy_card(self, index: int) -> Optional[Dict[str, Any]]:
         return self.send_rpc("buy", {"card": index})
 

@@ -21,7 +21,7 @@ class BalatroGameState:
 
 @dataclass
 class AgentAction:
-    action_type: str  # "PLAY", "DISCARD", "BUY", "SKIP"
+    action_type: str  # "PLAY", "DISCARD", "BUY", "SELL", "SKIP"
     cards: List[Card]
     target_item: Optional[str] = None
     reasoning: str = ""
@@ -73,6 +73,24 @@ def classify_joker(name: str) -> int:
             return 0
     return 1
 
+def find_weakest_joker_index(jokers: List[Dict[str, Any]]) -> Optional[int]:
+    """Finds the least valuable non-eternal joker to sell when slots are full."""
+    candidates = []
+    for idx, j in enumerate(jokers):
+        if j.get("modifier", {}).get("eternal"):
+            continue  # Cannot be sold
+        name = (j.get("label") or j.get("key", "")).lower()
+        cat = classify_joker(name)
+        # Priority: cat 0 or 1 is easiest to replace, especially flat mult or utility
+        candidates.append((cat, idx, name))
+
+    if not candidates:
+        return None
+
+    # Sort by tier (lowest category first)
+    candidates.sort(key=lambda x: x[0])
+    return candidates[0][1]
+
 class BalatroAgent:
     """Autonomous Balatro agent using coder/balatrollm official strategies and Laya neural decisions."""
 
@@ -84,12 +102,10 @@ class BalatroAgent:
         self.agent = laya.load("convaiinnovations/laya")
 
     def decide_hand_action(self, state: BalatroGameState, raw_g: Optional[Dict[str, Any]] = None) -> AgentAction:
-        """Decides whether to play the best available hand or discard cards."""
         best_hands = PokerEvaluator.find_best_playable_hands(state.hand, top_k=2)
         top_hand = best_hands[0]
         needed_chips = max(0, state.target_chips - state.current_chips)
 
-        # Rule 1: Instant Win if hand beats blind
         if top_hand.total_score >= needed_chips:
             return AgentAction(
                 action_type="PLAY",
@@ -98,7 +114,6 @@ class BalatroAgent:
                 confidence=1.0
             )
 
-        # Rule 2: Flush Digging
         if state.discards_left > 0:
             suit_counts = Counter(c.suit for c in state.hand)
             most_common_suit, count = suit_counts.most_common(1)[0]
@@ -111,11 +126,8 @@ class BalatroAgent:
                     confidence=0.98
                 )
 
-        # Rule 3: LLM Decision using official BalatroLLM GameState representation
         if state.discards_left > 0 and state.hands_left > 1:
             recommended_discards = PokerEvaluator.recommend_discards(state.hand)
-            
-            # Use rendered official gamestate if available
             gamestate_repr = self.sm.render_gamestate(raw_g) if raw_g else f"Ante {state.ante}, Hands: {state.hands_left}, Discards: {state.discards_left}, Needed: {needed_chips}"
             
             laya_state = {
@@ -151,7 +163,6 @@ class BalatroAgent:
             except Exception:
                 pass
 
-        # Fallback: Play best hand
         return AgentAction(
             action_type="PLAY",
             cards=top_hand.cards,
@@ -160,9 +171,6 @@ class BalatroAgent:
         )
 
     def decide_joker_order(self, current_jokers: List[Dict[str, Any]]) -> Optional[List[int]]:
-        """
-        Orders Jokers: [+Chips] -> [+Flat Mult] -> [+Scaling Mult] -> [X-Mult].
-        """
         if len(current_jokers) <= 1:
             return None
 
@@ -207,14 +215,12 @@ class BalatroAgent:
         hand_cards = hand or []
         n_hand = len(hand_cards)
 
-        # 1. Planet cards (no targets, permanent scaling)
         for idx, c in enumerate(pack_cards):
             name = (c.get("label") or c.get("key", "")).lower()
             set_type = c.get("set", "").upper()
             if set_type == "PLANET" or any(p in name for p in ["jupiter", "pluto", "mars", "saturn", "earth", "uranus", "venus", "neptune"]):
                 return (idx, None, f"Selected planet card '{c.get('label', name)}' for permanent hand level up.")
 
-        # 2. Economy and Instant Tarots (no targets)
         for idx, c in enumerate(pack_cards):
             name = (c.get("label") or c.get("key", "")).lower()
             if "temperance" in name:
@@ -228,7 +234,6 @@ class BalatroAgent:
             if "fool" in name:
                 return (idx, None, "Selected 'The Fool' to duplicate last consumable.")
 
-        # 3. Target-requiring Tarots if sufficient hand cards exist
         if n_hand >= 2:
             hand_sorted_by_val = sorted(range(n_hand), key=lambda i: hand_cards[i].value)
             worst_indices = hand_sorted_by_val[:2]
@@ -247,14 +252,12 @@ class BalatroAgent:
                     enhance_targets = [best_indices[-1]]
                     return (idx, enhance_targets, f"Selected enhancement '{c.get('label', name)}' on top card #{best_indices[-1]}.")
 
-        # 4. Buffoon pack Jokers
         for idx, c in enumerate(pack_cards):
             set_type = c.get("set", "").upper()
             if set_type == "JOKER" or "joker" in c.get("key", "").lower():
                 name = c.get("label") or c.get("key", "")
                 return (idx, None, f"Selected Joker '{name}' from Buffoon pack.")
 
-        # 5. Fallback safe cards
         TARGET_REQUIRING = ["death", "hanged man", "sun", "moon", "star", "world", "empress", "hierophant", "chariot", "magician", "lovers", "tower", "devil", "strength", "justice"]
         for idx, c in enumerate(pack_cards):
             name = (c.get("label") or c.get("key", "")).lower()
@@ -263,21 +266,19 @@ class BalatroAgent:
 
         return None
 
-    def decide_shop_action(self, state: BalatroGameState, shop_items: List[Dict[str, Any]], max_jokers: int = 5, raw_g: Optional[Dict[str, Any]] = None) -> Optional[Tuple[int, str]]:
+    def decide_shop_action(self, state: BalatroGameState, shop_items: List[Dict[str, Any]], max_jokers: int = 5, raw_g: Optional[Dict[str, Any]] = None) -> Optional[Tuple[str, int, str]]:
+        """
+        Evaluates shop items. Returns either:
+        - ("BUY", 0-based index, reasoning)
+        - ("SELL", 0-based joker index, reasoning)
+        - None (end shop)
+        """
         if not shop_items or state.money < 3:
             return None
 
-        jokers_count = len(state.jokers)
+        current_jokers_raw = raw_g.get("jokers", {}).get("cards", []) if raw_g else []
+        jokers_count = len(current_jokers_raw) if current_jokers_raw else len(state.jokers)
         can_hold_joker = jokers_count < max_jokers
-
-        affordable = []
-        for idx, item in enumerate(shop_items):
-            cost = item.get("cost", 4)
-            if cost <= state.money:
-                affordable.append((idx + 1, item, cost))
-
-        if not affordable:
-            return None
 
         mult_keywords = [
             "joker", "mult", "popcorn", "gros michel", "half", "abstract", 
@@ -285,20 +286,47 @@ class BalatroAgent:
             "blue joker", "scary", "droll", "sly", "clever", "wily", 
             "stencil", "supernova", "ride the bus", "green joker", "ceremonial"
         ]
-        scaling_keywords = ["cavendish", "constellation", "card sharp", "blueprint", "brainstorm", "trousers", "duo", "trio", "family"]
+        scaling_keywords = ["cavendish", "constellation", "card sharp", "blueprint", "brainstorm", "trousers", "duo", "trio", "family", "blackboard"]
 
-        for one_based_idx, item, cost in affordable:
+        # 1. Check if slots are full, but an elite Joker is in shop -> SELL WEAKEST JOKER TO MAKE ROOM!
+        if not can_hold_joker and current_jokers_raw:
+            weakest_idx = find_weakest_joker_index(current_jokers_raw)
+            if weakest_idx is not None:
+                weakest_joker = current_jokers_raw[weakest_idx]
+                sell_val = weakest_joker.get("cost", {}).get("sell", 1)
+                effective_money = state.money + sell_val
+
+                for idx, item in enumerate(shop_items):
+                    cost = item.get("cost", 4)
+                    name = str(item.get("name", "")).lower()
+                    is_elite = any(k in name for k in scaling_keywords)
+                    if is_elite and effective_money >= cost:
+                        weak_name = weakest_joker.get("label") or weakest_joker.get("key", "Joker")
+                        return ("SELL", weakest_idx, f"Selling weakest Joker '{weak_name}' (+${sell_val}) to make room for Elite Joker '{item.get('name')}' (${cost}).")
+
+        # 2. Buy if slots are open
+        affordable = []
+        for idx, item in enumerate(shop_items):
+            cost = item.get("cost", 4)
+            if cost <= state.money:
+                affordable.append((idx, item, cost))
+
+        if not affordable:
+            return None
+
+        for zero_based_idx, item, cost in affordable:
             name = str(item.get("name", "")).lower()
             if can_hold_joker:
                 if state.ante <= 3 or jokers_count < 2:
                     is_scoring = any(k in name for k in mult_keywords) or jokers_count == 0
                     if is_scoring:
-                        return (one_based_idx, f"Shop Priority: Buying '{item.get('name')}' (${cost}) to establish Mult/Chip foundation.")
+                        return ("BUY", zero_based_idx, f"Shop Priority: Buying '{item.get('name')}' (${cost}) to establish Mult/Chip foundation.")
                 else:
                     is_elite = any(k in name for k in scaling_keywords)
                     if is_elite or (state.money - cost >= 20):
-                        return (one_based_idx, f"Shop Priority: Acquiring scaling/utility Joker '{item.get('name')}' (${cost}).")
+                        return ("BUY", zero_based_idx, f"Shop Priority: Acquiring scaling/utility Joker '{item.get('name')}' (${cost}).")
 
+        # 3. Consult Laya if multiple choices remain
         if affordable and can_hold_joker and state.money >= 6:
             gamestate_repr = self.sm.render_gamestate(raw_g) if raw_g else f"Ante {state.ante}, Money: ${state.money}, Jokers: {state.jokers}"
             cand_summary = [f"#{idx}: {item.get('name')} (${cost})" for idx, item, cost in affordable]
@@ -322,15 +350,8 @@ class BalatroAgent:
                 choice = res["answers"]["shop_decision"]["choice"]
                 if choice == "buy_first":
                     first_idx, first_item, first_cost = affordable[0]
-                    return (first_idx, f"Strategy Decision: Purchasing '{first_item.get('name')}' (${first_cost}).")
+                    return ("BUY", first_idx, f"Strategy Decision: Purchasing '{first_item.get('name')}' (${first_cost}).")
             except Exception:
                 pass
 
         return None
-
-    def decide_shop_purchase(self, state: BalatroGameState, shop_jokers: List[str]) -> Optional[str]:
-        if not shop_jokers or state.money < 4:
-            return 'save_money'
-        if state.ante <= 3:
-            return 'buy_flat_mult'
-        return 'buy_scaling'

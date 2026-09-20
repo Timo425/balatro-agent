@@ -123,13 +123,18 @@ class BalatroLayaRunner:
 
         decision = self.agent.decide_shop_action(state, shop_items, max_jokers=max_jokers, raw_g=raw_g)
         if decision is not None:
-            one_based_idx, reasoning = decision
-            zero_based_idx = one_based_idx - 1
-            console.print(f"[bold green]🛒 Shop Decision:[/bold green] {reasoning}")
-            console.print(f"[bold green]>> BUYING ITEM AT INDEX:[/bold green] {zero_based_idx}")
-            self.client.buy_card(zero_based_idx)
-            time.sleep(0.5)
-            return
+            act_type, target_idx, reasoning = decision
+            if act_type == "SELL":
+                console.print(f"[bold yellow]💰 Selling Joker:[/bold yellow] {reasoning}")
+                self.client.sell_joker(target_idx)
+                time.sleep(0.5)
+                return
+            elif act_type == "BUY":
+                console.print(f"[bold green]🛒 Shop Decision:[/bold green] {reasoning}")
+                console.print(f"[bold green]>> BUYING ITEM AT INDEX:[/bold green] {target_idx}")
+                self.client.buy_card(target_idx)
+                time.sleep(0.5)
+                return
 
         # Check Booster packs
         packs_raw = raw_g.get("packs", {}).get("cards", [])
