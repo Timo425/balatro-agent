@@ -17,7 +17,8 @@ import re
 import sys
 import time
 import zlib
-from collections import Counter
+from collections import Counter, defaultdict
+from math import comb
 from pathlib import Path
 
 SAVE_ROOT = Path.home() / (
@@ -71,7 +72,13 @@ ANTE_BASE = {
     2: [300, 900, 2600, 8000, 20000, 36000, 60000, 100000],
     3: [300, 1000, 3200, 9000, 25000, 60000, 110000, 200000],
 }
+ROUND_TARGETS = {"Mail-In Rebate": "mail_card", "The Idol": "idol_card",
+                 "Ancient Joker": "ancient_card", "Castle": "castle_card"}
 STAKES = {1: "White", 2: "Red", 3: "Green", 4: "Black", 5: "Blue", 6: "Purple", 7: "Orange", 8: "Gold"}
+# Tagid, mis muudavad shopi jokerit (edition + tasuta). Mäng rakendab need eventina alles
+# PÄRAST save_run()-i, seega save'is on jokerid veel tavalised ja tagid veel käes.
+EDITION_TAGS = {"tag_negative": "negative", "tag_foil": "foil", "tag_holo": "holo",
+                "tag_polychrome": "polychrome"}
 RANK_ORDER = ["Ace", "King", "Queen", "Jack", "10", "9", "8", "7", "6", "5", "4", "3", "2"]
 SUITS = ["Spades", "Hearts", "Clubs", "Diamonds"]
 
@@ -153,7 +160,28 @@ def playing_card(c):
     return s
 
 
-def joker_line(c, show_cost=False):
+def pending_shop_tags(g):
+    """Ennusta, milliseid shopi jokereid edition-tagid kohe pärast save'i muudavad.
+
+    Järgib mängu loogikat (create_card_for_shop -> store_joker_modify): iga editionita
+    Joker saab esimese veel kasutamata edition-tagi, tag kulub ära.
+    """
+    if g["STATE"] != 5:
+        return {}, set()
+    free = [(i, t["key"]) for i, t in sorted((g.get("tags") or {}).items())
+            if t.get("key") in EDITION_TAGS]
+    out, used = {}, set()
+    for c in cards(g["cardAreas"].get("shop_jokers")):
+        if not free:
+            break
+        if c["ability"].get("set") == "Joker" and not c.get("edition"):
+            i, key = free.pop(0)
+            out[id(c)] = EDITION_TAGS[key]
+            used.add(i)
+    return out, used
+
+
+def joker_line(c, show_cost=False, G=None, pending=None):
     ab = c["ability"]
     s = c.get("label") or ab.get("name")
     tags = []
@@ -177,13 +205,82 @@ def joker_line(c, show_cost=False):
         state.update({k: v for k, v in extra.items() if not isinstance(v, dict)})
     elif extra not in (None, 0) and ab.get("set") == "Joker":
         state["extra"] = extra
+    # Igal roundil vahetuv sihtmärk on GAME.current_round all, mitte kaardil endal
+    target = ROUND_TARGETS.get(ab.get("name"))
+    if target and G:
+        t = G.get("current_round", {}).get(target, {})
+        state["target"] = " of ".join(str(t[k]) for k in ("rank", "suit") if t.get(k))
+    if ab.get("to_do_poker_hand"):
+        state["target"] = ab["to_do_poker_hand"]
     if state:
         s += " " + json.dumps(state)
-    if show_cost:
+    if pending:
+        s += f" — $0 ({pending} + free from a {pending.title()} Tag; the save predates the tag, so it still says ${c.get('cost')})"
+    elif show_cost:
         s += f" — ${c.get('cost')}"
     else:
         s += f" — sells ${c.get('sell_cost')}"
     return s
+
+
+def card_suits(c, smeared):
+    """Mis mastidena kaart flushis loeb: Wild = kõik, Stone = mitte ükski, Smeared liidab paarid."""
+    name = c["ability"]["name"]
+    if name == "Stone Card":
+        return set()
+    if name == "Wild Card":
+        return set(SUITS)
+    suit = c["base"]["suit"]
+    if smeared:
+        return {"Hearts", "Diamonds"} if suit in ("Hearts", "Diamonds") else {"Spades", "Clubs"}
+    return {suit}
+
+
+def flush_odds(hold, deck_suit, deck_size, hand_size, need, draws):
+    """Täpne tõenäosus, et käes on `need` sama masti kaarti pärast iga järjestikust tõmmet.
+
+    Iga tõmme = viska kuni 5 teise masti kaarti ära (discard või mängitud käsi) ja tõmba
+    sama palju tagasi. Hüpergeomeetriline jaotus olekute (käes, pakis mastis, paki suurus) üle.
+    """
+    dist = {(hold, deck_suit, deck_size): 1.0}
+    out = []
+    for _ in range(draws):
+        new = defaultdict(float)
+        for (h, S, D), pr in dist.items():
+            k = min(5, hand_size - h, D)
+            if h >= need or k <= 0:
+                new[(h, S, D)] += pr
+                continue
+            for x in range(min(k, S) + 1):
+                q = comb(S, x) * comb(D - S, k - x) / comb(D, k)
+                if q:
+                    new[(h + x, S - x, D - k)] += pr * q
+        dist = new
+        out.append(sum(pr for (h, _, _), pr in dist.items() if h >= need))
+    return out
+
+
+def blind_spots(g):
+    """Mida see snapshot EI näita. Mäng salvestab ainult kontrollpunktides (vt learned.md),
+    seega ostud, müügid, kasutatud consumable'id ja paki sisu jõuavad save'i hiljem või üldse mitte."""
+    action = g.get("ACTION") or {}
+    if action.get("type") == "use_card":
+        name = next((c.get("label") or c["ability"]["name"]
+                     for area in g["cardAreas"].values() for c in cards(area)
+                     if c.get("sort_id") == action.get("card")), "a pack")
+        return [f"Saved at the moment {name} was opened. Its contents are NOT in the save — "
+                "ask the player for a screenshot of the pack."]
+    state = g["STATE"]
+    if state == 5:
+        return ["Saved on entering the shop (or the last reroll). Anything bought, sold or used "
+                "since then is NOT reflected: shop cards may already be bought, money may be lower, "
+                "jokers/consumables may have changed. Ask the player what they bought before advising."]
+    if state in (1, 2, 3):
+        return ["Saved at the start of this hand/after the last discard. Tarot/Spectral cards used "
+                "since then are NOT reflected (hand, deck and consumables may differ)."]
+    if state == 7:
+        return ["Saved on reaching blind select. A pack from a skip tag opened here is NOT in the save."]
+    return []
 
 
 def blind_target(G, back, key):
@@ -205,6 +302,8 @@ def render(path, g):
     p(f"Deck: {back['name']} | Stake: {STAKES.get(G.get('stake'), G.get('stake'))} | "
       f"Ante {rr['ante']}/{G['win_ante']} | Round {G['round']}")
     p(f"Screen: {STATES.get(g['STATE'], g['STATE'])}")
+    for note in blind_spots(g):
+        p(f"⚠ Not in this snapshot: {note}")
     p(f"Money: ${G['dollars']} (interest ${G['interest_amount']} per $5, cap ${G['interest_cap']})")
     p(f"Hands left: {cr['hands_left']} | Discards left: {cr['discards_left']} | "
       f"Hand size: {A['hand']['config']['card_limit']} | "
@@ -223,9 +322,13 @@ def render(path, g):
     blind = g.get("BLIND", {})
     if blind.get("name"):
         p(f"Current blind: {blind['name']} — score so far {G.get('chips', 0):,} / {blind.get('chips'):,}")
+        left = blind.get("chips", 0) - G.get("chips", 0)
+        if left > 0 and cr["hands_left"]:
+            p(f"Still needed: {left:,} chips with {cr['hands_left']} hand{'s' * (cr['hands_left'] != 1)} left "
+              f"(= {left // cr['hands_left']:,} per hand on average)")
 
     p("\n## Jokers (left to right, order matters)")
-    p("\n".join(f"- {joker_line(c)}" for c in cards(A["jokers"])) or "- none")
+    p("\n".join(f"- {joker_line(c, G=G)}" for c in cards(A["jokers"])) or "- none")
 
     p("\n## Consumables")
     p("\n".join(f"- {joker_line(c)}" for c in cards(A["consumeables"])) or "- none")
@@ -238,12 +341,13 @@ def render(path, g):
             p(f"- {playing_card(c)}")
 
     # Pakid/shop — kõik alad, mis parasjagu olemas on
+    pending, used_tags = pending_shop_tags(g)
     for area, title in (("pack_cards", "Open pack"), ("shop_jokers", "Shop cards"),
                         ("shop_booster", "Shop packs"), ("shop_vouchers", "Shop voucher")):
         cs = cards(A.get(area))
         if cs:
             p(f"\n## {title}")
-            p("\n".join(f"- {joker_line(c, show_cost=True)}" for c in cs))
+            p("\n".join(f"- {joker_line(c, show_cost=True, G=G, pending=pending.get(id(c)))}" for c in cs))
     if g["STATE"] == 5:
         p(f"Reroll cost: ${cr['reroll_cost']}")
 
@@ -257,6 +361,28 @@ def render(path, g):
         ranks = Counter(c["base"]["value"] for c in pile)
         p(f"{label}: " + ", ".join(f"{s} {suits[s]}" for s in SUITS if suits[s]) + " | "
           + " ".join(f"{r}:{ranks[r]}" for r in RANK_ORDER if ranks[r]))
+    if hand and deck and g["STATE"] in (1, 2, 3):
+        names = {c["ability"]["name"] for c in cards(A["jokers"]) if not c.get("debuff")}
+        smeared, need = "Smeared Joker" in names, 4 if "Four Fingers" in names else 5
+        draws = min(cr["discards_left"] + cr["hands_left"] - 1, 4)
+        if draws > 0:
+            p(f"\n## Flush odds (exact, from the draw pile above)")
+            p(f"One 'draw' = throw away up to 5 cards that are not the suit — with a discard, or by "
+              f"playing them as a hand, which spends that hand. You have {cr['discards_left']} discards "
+              f"and {cr['hands_left']} hands; the last hand must be the flush itself. Chance of holding "
+              f"{need} of the suit after each draw:")
+            for suit in SUITS:
+                hold = sum(suit in card_suits(c, smeared) for c in hand)
+                in_deck = sum(suit in card_suits(c, smeared) for c in deck)
+                if hold >= need:
+                    p(f"- {suit}: already {hold} in hand")
+                    continue
+                odds = flush_odds(hold, in_deck, len(deck), len(hand), need, draws)
+                p(f"- {suit}: hold {hold}, {in_deck} in {len(deck)} cards → "
+                  + " · ".join(f"{i + 1} draw{'s' * bool(i)} {o:.0%}" for i, o in enumerate(odds)))
+            p("(Wild cards count for every suit, Stone for none. Not modelled: The Serpent, "
+              "cards drawn face down, debuffs — a debuffed card still counts toward the flush but scores nothing.)")
+
     special = [playing_card(c) for c in full
                if c["ability"]["name"] != "Default Base" or c.get("edition") or c.get("seal")
                or c["ability"].get("perma_bonus")]
@@ -271,7 +397,8 @@ def render(path, g):
 
     vouchers = [k.removeprefix("v_") for k in G.get("used_vouchers", {})]
     p(f"\nVouchers owned: {', '.join(vouchers) or 'none'}")
-    tags = [t.get("key", "?").removeprefix("tag_") for t in (g.get("tags") or {}).values()]
+    tags = [t.get("key", "?").removeprefix("tag_") for i, t in sorted((g.get("tags") or {}).items())
+            if i not in used_tags]
     p(f"Tags held: {', '.join(tags) or 'none'}")
     p(f"Bosses already seen: {', '.join(k.removeprefix('bl_') for k, v in G.get('bosses_used', {}).items() if v) or 'none'}")
     rs = G.get("round_scores", {})
