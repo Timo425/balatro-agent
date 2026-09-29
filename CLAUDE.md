@@ -146,3 +146,6 @@ behind it.
 - Code, comments and docs in this repo are in English (it builds on English
   upstreams and the docs are read by models). Terminal output is partly Estonian.
 - The game install stays vanilla; play on Profile 2/3, never Profile 1.
+- Steamodded and BalatroBot are parked in `Balatro/Mods-disabled/` so normal play keeps
+  achievements (balatro-advisor's Lovely-only live mod stays in `Mods/`). Run
+  `tools/mods.sh bot` before a bench session and `tools/mods.sh play` after it.
