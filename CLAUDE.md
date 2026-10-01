@@ -146,6 +146,8 @@ behind it.
 - Code, comments and docs in this repo are in English (it builds on English
   upstreams and the docs are read by models). Terminal output is partly Estonian.
 - The game install stays vanilla; play on Profile 2/3, never Profile 1.
-- Steamodded and BalatroBot are parked in `Balatro/Mods-disabled/` so normal play keeps
-  achievements (balatro-advisor's Lovely-only live mod stays in `Mods/`). Run
-  `tools/mods.sh bot` before a bench session and `tools/mods.sh play` after it.
+- Bench sessions: `tools/bot.sh start` launches the game with Steamodded + BalatroBot from
+  a separate `Balatro/BotMods/` folder (Lovely `--mod-dir`) on Profile 3, and
+  `tools/bot.sh stop` closes it and restores the player's settings (Profile 1). Normal
+  play's `Mods/` (balatro-advisor's advisor-live only) is never touched, so achievements
+  stay on. (`tools/mods.sh` is the older folder-swapping way.)
