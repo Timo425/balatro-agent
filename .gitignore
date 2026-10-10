@@ -7,3 +7,7 @@ vendor/
 logs/
 benchmark_results.json
 .bench_session.json
+*.jkr
+*.jsonl
+.env
+.claude/settings.local.json

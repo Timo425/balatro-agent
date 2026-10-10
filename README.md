@@ -175,6 +175,6 @@ model and the run does not measure the model.
 | Component | Upstream | Contribution |
 | --- | --- | --- |
 | Game mod / IPC bridge | [`coder/balatrobot`](https://github.com/coder/balatrobot) v1.5.2 | JSON-RPC 2.0 API for reading state and dispatching actions |
-| Strategy & prompts | [`coder/balatrollm`](https://github.com/coder/balatrollm) | `strategies/default/` templates and `rules/balatro-strategy.md` |
+| Strategy & prompts | [`coder/balatrollm`](https://github.com/coder/balatrollm) | `strategies/` templates and `rules/balatro-strategy.md`, copied unmodified (MIT, see [`strategies/LICENSE-balatrollm`](strategies/LICENSE-balatrollm)) |
 | Decision model | [`convaiinnovations/laya`](https://huggingface.co/convaiinnovations/laya) | ModernBERT-large System 1 decision model, ~0.3 s per decision on CPU |
 | Everything else | this repository | Fact extraction, the decision tree, the offline simulator and the stress harness |
