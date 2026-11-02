@@ -2,13 +2,16 @@
 # Launch Balatro for the bot bench WITHOUT touching normal play:
 #   - Steamodded + BalatroBot load from a separate BotMods folder (Lovely --mod-dir),
 #     so Balatro/Mods (balatro-advisor's advisor-live only) stays as it is;
-#   - the bot plays on Profile 3; your settings.jkr is backed up and restored on stop,
-#     so the next normal launch is Profile 1 with achievements on.
+#   - the bot plays on Profile 3. Once that profile is in its own save folder, BalatroBot beside
+#     Balatro (BotMods/bav-bench switches the game there; Steam Cloud doesn't sync it), your files
+#     are never touched; before that, your settings.jkr is backed up and restored on stop, so the
+#     next normal launch is Profile 1 with achievements on.
 #   tools/bot.sh start | stop | status
 set -euo pipefail
 B="$HOME/.steam/debian-installation/steamapps/compatdata/2379780/pfx/drive_c/users/steamuser/AppData/Roaming/Balatro"
 BOT="$B/BotMods"
 BACKUP="$B/settings.jkr.play-backup"
+OWN="$(dirname "$B")/BalatroBot"  # the bot's own save folder (BotMods/bav-bench), once its profile is there
 WIN_BOT='C:\users\steamuser\AppData\Roaming\Balatro\BotMods'
 PROFILE=3
 
@@ -35,10 +38,14 @@ case "${1:-}" in
     for m in Steamodded Balatrobot; do
       [ -e "$BOT/$m" ] || cp -r "$B/Mods-disabled/$m" "$BOT/"
     done
-    [ -e "$BACKUP" ] || cp "$B/settings.jkr" "$BACKUP"
-    set_profile "$PROFILE"
-    echo "Profile $PROFILE set (your settings backed up). Launching with BotMods…"
-    steam -applaunch 2379780 --mod-dir "$WIN_BOT" >/dev/null 2>&1 &
+    if [ -e "$OWN/$PROFILE/profile.jkr" ]; then
+      echo "The bot's own save folder (BalatroBot, Profile $PROFILE): your settings untouched. Launching with BotMods…"
+    else
+      [ -e "$BACKUP" ] || cp "$B/settings.jkr" "$BACKUP"
+      set_profile "$PROFILE"
+      echo "Profile $PROFILE set (your settings backed up). Launching with BotMods…"
+    fi
+    steam -applaunch 2379780 --mod-dir "$WIN_BOT" --disable-console >/dev/null 2>&1 &  # no Lovely console window
     for _ in $(seq 60); do
       if (exec 3<>/dev/tcp/127.0.0.1/12346) 2>/dev/null; then echo "BalatroBot API is up on 127.0.0.1:12346."; exit 0; fi
       sleep 2
